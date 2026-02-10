@@ -17,7 +17,7 @@ from src.training import setup_experiment, train_semantic_model
 def main():
     # Config
     MODEL_NAME = "FastSCNN"
-    DATA_ROOT = os.path.join(parent_dir, 'data/road-damage-detection-1-coco')
+    DATA_ROOT = os.path.join(parent_dir, 'data/road-damage-detection-coco')
     MODELS_DIR = os.path.join(parent_dir, 'models')
     BATCH_SIZE = 4
     LR = 0.001

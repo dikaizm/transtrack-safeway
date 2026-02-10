@@ -38,7 +38,7 @@ def collate_fn(batch):
 def main():
     # Config
     MODEL_NAME = "MaskRCNN"
-    DATA_ROOT = os.path.join(parent_dir, 'data/road-damage-detection-1-coco')
+    DATA_ROOT = os.path.join(parent_dir, 'data/road-damage-detection-coco')
     MODELS_DIR = os.path.join(parent_dir, 'models')
     # Mask R-CNN often requires smaller batch size if GPU memory is tight, but notebook used 2.
     BATCH_SIZE = 2 
