@@ -1,5 +1,6 @@
 import os
 import sys
+import csv
 import torch
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -20,6 +21,12 @@ def train_bisenet_model(model, train_loader, valid_loader, criterion, optimizer,
     """
     best_iou = 0.0
     
+    # Init CSV
+    csv_file = os.path.join(exp_dir, 'training_log.csv')
+    with open(csv_file, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['epoch', 'train_loss', 'valid_loss', 'iou'])
+
     for epoch in range(epochs):
         model.train()
         train_loss = 0
@@ -80,6 +87,11 @@ def train_bisenet_model(model, train_loader, valid_loader, criterion, optimizer,
         iou = intersection / (union + 1e-6)
         logger.info(f"Valid Loss: {avg_valid_loss:.4f}, IOU: {iou:.4f}")
         
+        # Log to CSV
+        with open(csv_file, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch+1, avg_train_loss, avg_valid_loss, iou])
+        
         # Save Last Model
         torch.save(model.state_dict(), os.path.join(exp_dir, "last_model.pth"))
         
@@ -94,7 +106,7 @@ def main():
     MODEL_NAME = "BiSeNetV2"
     DATA_ROOT = os.path.join(parent_dir, 'data/road-damage-detection-coco')
     if not os.path.exists(DATA_ROOT):
-         DATA_ROOT = os.path.join(parent_dir, 'data/road-damage-detection-coco')
+         DATA_ROOT = os.path.join(parent_dir, 'data/road-damage-detection-1-coco')
 
     MODELS_DIR = os.path.join(parent_dir, 'models')
     BATCH_SIZE = 4 # BiSeNet might be able to handle larger batch sizes

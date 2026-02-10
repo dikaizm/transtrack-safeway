@@ -1,6 +1,7 @@
 import os
 import torch
 import logging
+import csv
 import numpy as np
 from datetime import datetime
 
@@ -35,6 +36,12 @@ def train_semantic_model(model, train_loader, valid_loader, criterion, optimizer
     Training loop for semantic segmentation models (FastSCNN, UNet, DeepLab).
     """
     best_iou = 0.0
+    
+    # Init CSV
+    csv_file = os.path.join(exp_dir, 'training_log.csv')
+    with open(csv_file, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['epoch', 'train_loss', 'valid_loss', 'iou'])
     
     for epoch in range(epochs):
         model.train()
@@ -86,6 +93,11 @@ def train_semantic_model(model, train_loader, valid_loader, criterion, optimizer
         iou = intersection / (union + 1e-6)
         logger.info(f"Valid Loss: {avg_valid_loss:.4f}, IOU: {iou:.4f}")
         
+        # Log to CSV
+        with open(csv_file, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch+1, avg_train_loss, avg_valid_loss, iou])
+        
         # Save Last Model
         torch.save(model.state_dict(), os.path.join(exp_dir, "last_model.pth"))
         
@@ -102,6 +114,12 @@ def train_instance_model(model, train_loader, valid_loader, optimizer, device, e
     and save checkpoints.
     """
     min_train_loss = float('inf')
+    
+    # Init CSV
+    csv_file = os.path.join(exp_dir, 'training_log.csv')
+    with open(csv_file, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['epoch', 'train_loss'])
     
     for epoch in range(epochs):
         model.train()
@@ -124,6 +142,11 @@ def train_instance_model(model, train_loader, valid_loader, optimizer, device, e
             
         avg_train_loss = train_loss / steps if steps > 0 else 0
         logger.info(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.4f}")
+        
+        # Log to CSV
+        with open(csv_file, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch+1, avg_train_loss])
         
         if lr_scheduler:
             lr_scheduler.step()
