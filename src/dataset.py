@@ -64,8 +64,13 @@ class RoadDamageDataset(Dataset):
                 
             # Convert to Tensor (C, H, W) for image, (H, W) or (1, H, W) for mask
             # Typically SMP expects image as float and mask as long
-            image = torch.from_numpy(image.transpose(2, 0, 1)).float() / 255.0
-            mask = torch.from_numpy(mask).long()
+            if not isinstance(image, torch.Tensor):
+                image = torch.from_numpy(image.transpose(2, 0, 1)).float() / 255.0
+            
+            if not isinstance(mask, torch.Tensor):
+                mask = torch.from_numpy(mask).long()
+            else:
+                mask = mask.long()
             
             return image, mask
             
@@ -102,7 +107,8 @@ class RoadDamageDataset(Dataset):
             # Note: Mask R-CNN transforms are tricky with boxes/masks. 
             # Usually handled by specific libraries or custom code.
             # Here we just convert image to tensor.
-            image = torch.from_numpy(image.transpose(2, 0, 1)).float() / 255.0
+            if not isinstance(image, torch.Tensor):
+                image = torch.from_numpy(image.transpose(2, 0, 1)).float() / 255.0
             
             return image, target
 
