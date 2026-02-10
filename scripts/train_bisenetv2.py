@@ -94,7 +94,7 @@ def main():
     MODEL_NAME = "BiSeNetV2"
     DATA_ROOT = os.path.join(parent_dir, 'data/road-damage-detection-coco')
     if not os.path.exists(DATA_ROOT):
-         DATA_ROOT = os.path.join(parent_dir, 'data/road-damage-detection-1-coco')
+         DATA_ROOT = os.path.join(parent_dir, 'data/road-damage-detection-coco')
 
     MODELS_DIR = os.path.join(parent_dir, 'models')
     BATCH_SIZE = 4 # BiSeNet might be able to handle larger batch sizes
