@@ -19,9 +19,9 @@ def main():
     MODEL_NAME = "FastSCNN"
     DATA_ROOT = os.path.join(parent_dir, 'data/road-damage-detection-coco')
     MODELS_DIR = os.path.join(parent_dir, 'models')
-    BATCH_SIZE = 4
+    BATCH_SIZE = 8
     LR = 0.001
-    EPOCHS = 50
+    EPOCHS = 200
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     if torch.backends.mps.is_available():
         DEVICE = 'mps'

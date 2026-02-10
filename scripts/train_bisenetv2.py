@@ -109,9 +109,9 @@ def main():
          DATA_ROOT = os.path.join(parent_dir, 'data/road-damage-detection-1-coco')
 
     MODELS_DIR = os.path.join(parent_dir, 'models')
-    BATCH_SIZE = 4 # BiSeNet might be able to handle larger batch sizes
-    LR = 0.01 # SGD usually used for BiSeNet
-    EPOCHS = 50
+    BATCH_SIZE = 8 # BiSeNet might be able to handle larger batch sizes
+    LR = 0.001 # SGD usually used for BiSeNet
+    EPOCHS = 200
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     if torch.backends.mps.is_available():
         DEVICE = 'mps'
