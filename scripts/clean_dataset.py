@@ -46,7 +46,7 @@ def clean_empty_labels(dataset_dir):
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, '..'))
-    dataset_dir = os.path.join(project_root, 'data', 'road-damage-detection-yolov8-merged')
+    dataset_dir = os.path.join(project_root, 'data', 'road-damage-detection-yolov5-merged')
     
     print(f"Cleaning dataset at: {dataset_dir}")
     clean_empty_labels(dataset_dir)
