@@ -10,7 +10,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
 
 # --- Configuration ---
 YOLO_DIR = os.path.join(PROJECT_ROOT, 'yolov5')
-DATASET_DIR = os.path.join(PROJECT_ROOT, 'data', 'road-damage-detection-yolov8-merged')  # YOLOv5/v8 share same format
+DATASET_DIR = os.path.join(PROJECT_ROOT, 'data', 'road-damage-detection-yolov5-merged')  # YOLOv5/v8 share same format
 MODELS_DIR = os.path.join(PROJECT_ROOT, 'models')
 YAML_PATH = os.path.join(DATASET_DIR, 'data.yaml')
 
