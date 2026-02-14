@@ -59,7 +59,11 @@ def main():
         project=MODELS_DIR,
         name=folder_name,
         device=device,
-        plots=True
+        plots=True,
+        workers=0,  # Disable multiprocessing to avoid DataLoader errors
+        cache=False,  # Disable caching to avoid corrupted data
+        overlap_mask=True,  # Allow overlapping masks
+        mask_ratio=4  # Downsample ratio for masks
     )
     
     print(f"Training complete. Results saved to {results.save_dir}")
