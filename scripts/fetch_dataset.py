@@ -17,9 +17,9 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
 DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
 
 # Dataset paths
-SRC1 = Path(DATA_DIR) / "road-damage-detection-yolov8-int"
-SRC2 = Path(DATA_DIR) / "road-damage-detection-yolov8-ext"
-DST = Path(DATA_DIR) / "road-damage-detection-yolov8-merged"
+SRC1 = Path(DATA_DIR) / "road-damage-detection-yolov5-int"
+SRC2 = Path(DATA_DIR) / "road-damage-detection-yolov5-ext"
+DST = Path(DATA_DIR) / "road-damage-detection-yolov5-merged"
 
 SPLITS = ["train", "valid", "test"]
 
@@ -30,13 +30,13 @@ def download_datasets():
     rf1 = Roboflow(api_key="MYuIstjO07DOJx3bmDZW")
     project1 = rf1.workspace("farrellhrs").project("road-damage-detection-uutxu")
     version1 = project1.version(3)
-    version1.download("yolov8", location=str(SRC1))
+    version1.download("yolov5", location=str(SRC1))
     
     print("Downloading external dataset...")
     rf2 = Roboflow(api_key="0CEdpB53poTT1jUXgvm7")
     project2 = rf2.workspace("rdd-heop9").project("road-damage-detection-ytvlw")
     version2 = project2.version(2)
-    version2.download("yolov8", location=str(SRC2))
+    version2.download("yolov5", location=str(SRC2))
     
     print("Dataset downloads complete.")
 
