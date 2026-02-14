@@ -11,7 +11,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
 
 # --- Configuration ---
-DATASET_DIR = os.path.join(PROJECT_ROOT, 'data', 'road-damage-detection-yolov8-merged')
+DATASET_DIR = os.path.join(PROJECT_ROOT, 'data', 'road-damage-detection-yolov8-int')
 MODELS_DIR = os.path.join(PROJECT_ROOT, 'models')
 YAML_PATH = os.path.join(DATASET_DIR, 'data.yaml')
 
