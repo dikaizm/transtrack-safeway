@@ -80,6 +80,45 @@ def patch_polygons2masks_overlap():
         return False
 
 
+def patch_random_perspective():
+    """
+    Patch random_perspective in augmentations.py to fix IndexError when len(targets) != len(segments).
+    """
+    aug_path = os.path.join(YOLO_DIR, 'utils', 'segment', 'augmentations.py')
+    
+    if not os.path.exists(aug_path):
+        print(f"Warning: Could not find {aug_path}")
+        return
+
+    with open(aug_path, 'r') as f:
+        content = f.read()
+
+    if 'targets = targets[:n]' in content:
+        print("YOLOv5 random_perspective already patched")
+        return
+
+    # Pattern to match
+    old_code = '    if n := len(targets):\n        new = np.zeros((n, 4))'
+    
+    # New code with synchronization
+    new_code = ('    if n := len(targets):\n'
+                '        if len(segments) != n:\n'
+                '            n = min(n, len(segments))\n'
+                '            targets = targets[:n]\n'
+                '            segments = segments[:n]\n'
+                '        new = np.zeros((n, 4))')
+
+    if old_code in content:
+        content = content.replace(old_code, new_code)
+        try:
+            with open(aug_path, 'w') as f:
+                f.write(content)
+            print(f"✓ Patched {aug_path} to fix segment/label mismatch")
+        except IOError as e:
+            print(f"Error patching random_perspective: {e}")
+    else:
+        print(f"Warning: Could not find target pattern in {aug_path}")
+
 def setup_yolov5():
     """Clone YOLOv5 repository and apply necessary patches."""
     if not os.path.exists(YOLO_DIR):
@@ -92,6 +131,7 @@ def setup_yolov5():
     
     # Always try to apply patch (idempotent - checks if already applied)
     patch_polygons2masks_overlap()
+    patch_random_perspective()
 
 def main():
     setup_yolov5()
