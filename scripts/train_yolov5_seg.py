@@ -13,7 +13,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
 
 # --- Configuration ---
 YOLO_DIR = os.path.join(PROJECT_ROOT, 'yolov5')
-DATASET_DIR = os.path.join(PROJECT_ROOT, 'data', 'yolo_seg_dataset')
+DATASET_DIR = os.path.join(PROJECT_ROOT, 'data', 'road-damage-detection-yolov5-merged')
 MODELS_DIR = os.path.join(PROJECT_ROOT, 'models')
 YAML_PATH = os.path.join(DATASET_DIR, 'data.yaml')
 
