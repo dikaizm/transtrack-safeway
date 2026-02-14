@@ -17,8 +17,8 @@ DATASET_DIR = os.path.join(PROJECT_ROOT, 'data', 'yolo_seg_dataset')
 MODELS_DIR = os.path.join(PROJECT_ROOT, 'models')
 YAML_PATH = os.path.join(DATASET_DIR, 'data.yaml')
 
-EPOCHS = 50
-BATCH_SIZE = 16
+EPOCHS = 5
+BATCH_SIZE = 8
 IMG_SIZE = 640
 MODEL_WEIGHTS = 'yolov5s-seg.pt'  # Pretrained weights
 
