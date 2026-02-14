@@ -27,7 +27,8 @@ def patch_polygons2masks_overlap():
     """
     Patch YOLOv5's polygons2masks_overlap to fix OverflowError when there are 256+ instances.
     The original code uses uint8 which can only hold 0-255, but mosaic augmentation can create
-    samples with 256+ instances.
+    samples with 256+ instances. The overflow happens at `mask = ms[i] * (i + 1)` because each
+    individual mask (ms[i]) is uint8, so the multiplication overflows before being stored.
     """
     dataloaders_path = os.path.join(YOLO_DIR, 'utils', 'segment', 'dataloaders.py')
     
@@ -39,28 +40,30 @@ def patch_polygons2masks_overlap():
         content = f.read()
     
     # Check if already patched
-    if 'uint16 if len(segments) > 255' in content:
+    if '# PATCHED: uint8 overflow fix' in content:
         print("YOLOv5 polygons2masks_overlap already patched")
         return True
     
-    # Try multiple patterns to handle different YOLOv5 versions
-    patterns = [
-        # Pattern 1: Original format
-        r'dtype=np\.int32 if len\(segments\) > 255 else np\.uint8',
-        # Pattern 2: With extra spaces
-        r'dtype\s*=\s*np\.int32\s+if\s+len\(segments\)\s*>\s*255\s+else\s+np\.uint8',
-        # Pattern 3: Just uint8 dtype assignment in polygons2masks_overlap context
-        r'(def polygons2masks_overlap[^}]+?)dtype\s*=\s*np\.uint8',
-    ]
-    
-    replacement = 'dtype=np.int32 if len(segments) > 65535 else (np.uint16 if len(segments) > 255 else np.uint8)'
-    
     patched = False
-    for pattern in patterns[:2]:  # Try first two patterns
-        if re.search(pattern, content):
-            content = re.sub(pattern, replacement, content)
-            patched = True
-            break
+    
+    # Fix 1: Cast ms[i] to int32 before multiplication to prevent uint8 overflow.
+    # This is the actual line that causes OverflowError when i+1 >= 256.
+    old_mult = 'mask = ms[i] * (i + 1)'
+    new_mult = 'mask = ms[i].astype(np.int32) * (i + 1)  # PATCHED: uint8 overflow fix'
+    
+    if old_mult in content:
+        content = content.replace(old_mult, new_mult)
+        patched = True
+    
+    # Fix 2: Also upgrade the accumulator masks array dtype from uint8 to int32
+    # so it can store the larger index values.
+    old_dtype_pattern = re.compile(
+        r'(def polygons2masks_overlap.*?masks\s*=\s*np\.zeros\([^)]+,\s*dtype\s*=\s*np\.)uint8',
+        re.DOTALL
+    )
+    if old_dtype_pattern.search(content):
+        content = old_dtype_pattern.sub(r'\g<1>int32', content)
+        patched = True
     
     if patched:
         try:
