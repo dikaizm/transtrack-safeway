@@ -17,7 +17,7 @@ YAML_PATH = os.path.join(DATASET_DIR, 'data.yaml')
 EPOCHS = 100
 BATCH_SIZE = 16
 IMG_SIZE = 640
-MODEL_WEIGHTS = 'yolov5m-seg.pt'  # Pretrained weights
+MODEL_WEIGHTS = 'yolov5l-seg.pt'  # Pretrained weights
 
 # Ensure models directory exists
 os.makedirs(MODELS_DIR, exist_ok=True)
