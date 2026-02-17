@@ -3,3 +3,4 @@ data/
 src/__pycache__/
 models/
 yolov5/
+runs/
