@@ -87,7 +87,7 @@ traitlets==5.14.3
 typer-slim==0.21.1
 typing-inspection==0.4.2
 typing_extensions==4.15.0
-ultralytics==8.4.14
+ultralytics==8.2.103
 ultralytics-thop==2.0.18
 urllib3==2.6.3
 wcwidth==0.6.0
