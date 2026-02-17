@@ -4,3 +4,4 @@ src/__pycache__/
 models/
 yolov5/
 runs/
+yolov8m-seg.pt
