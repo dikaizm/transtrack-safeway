@@ -15,7 +15,7 @@ DATASET_DIR = os.path.join(PROJECT_ROOT, 'data', 'road-damage-detection-yolov8-m
 MODELS_DIR = os.path.join(PROJECT_ROOT, 'models')
 YAML_PATH = os.path.join(DATASET_DIR, 'data.yaml')
 
-EPOCHS = 100
+EPOCHS = 3
 BATCH_SIZE = 16
 IMG_SIZE = 640
 MODEL_WEIGHTS = 'yolov8m-seg.pt'  # Pretrained weights
