@@ -1,15 +1,23 @@
 """
 Evaluation entry point.
 
+Always evaluates per condition (day / wet / night) separately.
+Never use only aggregate mAP — it hides poor performance on specific conditions.
+
 Usage:
-    # Evaluate on all conditions
+    # Evaluate on all available conditions (recommended)
     python evaluate.py --config config/yolo_detection.yaml --model runs/train/weights/best.pt
 
     # Evaluate on specific conditions only
     python evaluate.py --config config/yolo_detection.yaml --model best.pt --conditions day night
 
-    # Custom run name
-    python evaluate.py --config config/yolo_detection.yaml --model best.pt --run-name "eval-v1-day"
+    # Custom MLflow run name
+    python evaluate.py --config config/yolo_detection.yaml --model best.pt --run-name "eval-v1"
+
+Expected test dataset structure:
+    data/test/day/    images/ + labels/
+    data/test/wet/    images/ + labels/
+    data/test/night/  images/ + labels/
 """
 
 import argparse
@@ -57,7 +65,10 @@ def main():
     parser.add_argument(
         "--conditions", nargs="+", default=None,
         choices=["all", "day", "wet", "night"],
-        help="Conditions to evaluate on. Defaults to all available."
+        help=(
+            "Conditions to evaluate on. Defaults to day+wet+night if dirs exist. "
+            "Avoid using 'all' alone — aggregate mAP hides per-condition failures."
+        )
     )
     parser.add_argument(
         "--run-name", default=None,
@@ -77,10 +88,18 @@ def main():
         print("Error: config must specify model.type")
         sys.exit(1)
 
+    # Warn if user explicitly requests aggregate-only evaluation
+    if args.conditions == ["all"]:
+        print(
+            "Warning: evaluating on 'all' only. "
+            "This hides per-condition failures (night/wet). "
+            "Use --conditions day wet night for a complete picture."
+        )
+
     print(f"Pipeline   : {pipeline_type}")
     print(f"Task       : {config['model'].get('task', 'detect')}")
     print(f"Model      : {model_path}")
-    print(f"Conditions : {args.conditions or 'all available'}")
+    print(f"Conditions : {args.conditions or 'day + wet + night (auto)'}")
     print(f"MLflow     : {config['mlflow']['tracking_uri']}")
     print()
 

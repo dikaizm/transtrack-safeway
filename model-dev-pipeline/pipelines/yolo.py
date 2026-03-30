@@ -119,13 +119,24 @@ class YOLOPipeline(BasePipeline):
         model_path = Path(model_path)
         test_cfg = self.data_cfg.get("test", {})
 
-        # Resolve conditions to evaluate
+        # Default: always evaluate per condition, never just aggregate
         if conditions is None:
-            conditions = [k for k, v in test_cfg.items() if Path(v).exists()]
+            conditions = [
+                k for k in ["day", "wet", "night"]
+                if Path(test_cfg.get(k, "")).exists()
+            ]
         if not conditions:
+            # Fallback to "all" only if no condition subdirs exist yet
+            print(
+                "Warning: no per-condition test dirs found "
+                "(data/test/day, data/test/wet, data/test/night). "
+                "Falling back to aggregate 'all'. "
+                "Split your test set by condition for meaningful evaluation."
+            )
             conditions = ["all"]
 
         all_metrics: dict[str, dict] = {}
+        classes = self.data_cfg.get("classes", [])
         tags = {
             "model_type": "yolo",
             "task": self.model_cfg.get("task", "detect"),
@@ -135,7 +146,7 @@ class YOLOPipeline(BasePipeline):
 
         with mlflow.start_run(run_name=run_name or f"eval-{model_path.stem}", tags=tags):
             mlflow.log_param("model_path", str(model_path))
-            mlflow.log_param("conditions", conditions)
+            mlflow.log_param("conditions", ",".join(conditions))
 
             model = self.load_model(model_path)
 
@@ -146,6 +157,11 @@ class YOLOPipeline(BasePipeline):
                     continue
 
                 print(f"\nEvaluating on condition: {condition}")
+
+                # Apply same preprocessing used at training/inference
+                # (CLAHE for night, light CLAHE for dusty, no-op for day)
+                self._preprocess_dataset_images(data_path)
+
                 dataset_yaml = self._write_dataset_yaml(split_override=data_path)
 
                 metrics = model.val(
@@ -155,15 +171,16 @@ class YOLOPipeline(BasePipeline):
                     device=self.train_cfg.get("device", 0),
                 )
 
-                condition_metrics = self._extract_eval_metrics(
-                    metrics, condition
-                )
+                condition_metrics = self._extract_eval_metrics(metrics, condition)
                 all_metrics[condition] = condition_metrics
                 log_metrics_per_condition(condition_metrics, condition)
 
-                # Save per-condition confusion matrix artifact
                 if hasattr(metrics, "confusion_matrix"):
                     self._log_confusion_matrix(metrics, condition)
+
+            # Log and print per-condition comparison summary
+            if len(all_metrics) > 1:
+                self._log_condition_summary(all_metrics, classes)
 
             print("\nEvaluation complete.")
             return all_metrics
@@ -210,15 +227,17 @@ class YOLOPipeline(BasePipeline):
         )
 
     def _write_dataset_yaml(self, split_override: str | None = None) -> str:
-        """Write a temporary YOLO-format dataset.yaml and return its path."""
+        """Write a temporary YOLO-format dataset.yaml and return its path.
+        Uses absolute paths to avoid cwd-dependent resolution issues.
+        """
         classes = self.data_cfg.get("classes", [])
         test_path = split_override or self.data_cfg.get("test", {}).get("all", "")
 
         dataset = {
-            "path": ".",
-            "train": self.data_cfg.get("train", "data/train"),
-            "val": self.data_cfg.get("val", "data/val"),
-            "test": test_path,
+            "path": "/",   # absolute anchor — all splits below are absolute too
+            "train": str(Path(self.data_cfg.get("train", "data/train")).resolve()),
+            "val":   str(Path(self.data_cfg.get("val",   "data/val")).resolve()),
+            "test":  str(Path(test_path).resolve()) if test_path else "",
             "nc": len(classes),
             "names": classes,
         }
@@ -302,6 +321,60 @@ class YOLOPipeline(BasePipeline):
             result["mAP50-95_mask"] = float(seg.map)
 
         return result
+
+    def _log_condition_summary(
+        self,
+        all_metrics: dict[str, dict],
+        classes: list[str],
+    ) -> None:
+        """
+        Print and log a side-by-side mAP50 comparison table across conditions.
+        Logged to MLflow as a text artifact: evaluation/condition_summary.txt
+        Helps quickly spot which condition the model underperforms on.
+        """
+        conditions = list(all_metrics.keys())
+        col_w = 12
+
+        header  = f"{'Class':<22}" + "".join(f"{c:>{col_w}}" for c in conditions)
+        divider = "-" * len(header)
+        rows = [header, divider]
+
+        # Aggregate mAP50 row
+        agg_row = f"{'mAP50 (all)':<22}"
+        for cond in conditions:
+            val = all_metrics[cond].get("mAP50", 0.0)
+            agg_row += f"{val:>{col_w}.4f}"
+        rows.append(agg_row)
+        rows.append(divider)
+
+        # Per-class mAP50 rows
+        for cls in classes:
+            row = f"{cls:<22}"
+            for cond in conditions:
+                val = all_metrics[cond].get(f"mAP50/{cls}", 0.0)
+                row += f"{val:>{col_w}.4f}"
+            rows.append(row)
+
+        summary = "\n".join(rows)
+        print(f"\n{'='*len(divider)}")
+        print("CONDITION SUMMARY (mAP50)")
+        print(summary)
+        print(f"{'='*len(divider)}\n")
+
+        # Log as MLflow artifact
+        import tempfile as _tmp
+        with _tmp.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, prefix="condition_summary_"
+        ) as f:
+            f.write("CONDITION SUMMARY (mAP50)\n\n")
+            f.write(summary)
+            tmp_path = f.name
+
+        mlflow.log_artifact(tmp_path, artifact_path="evaluation")
+
+        # Also log per-condition aggregate as flat metrics for MLflow chart view
+        for cond in conditions:
+            mlflow.log_metric(f"summary/mAP50_{cond}", all_metrics[cond].get("mAP50", 0.0))
 
     def _log_confusion_matrix(self, metrics, condition: str) -> None:
         try:
