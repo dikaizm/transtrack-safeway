@@ -1,0 +1,22 @@
+mlflow:
+  tracking_uri: "https://mlflow-geoai.stelarea.com/"
+  experiment_name: "transtrack-road-safety"
+
+data:
+  train: "data/train"
+  val: "data/val"
+  test:
+    all: "data/test"
+    day: "data/test/day"
+    wet: "data/test/wet"
+    night: "data/test/night"
+  classes:
+    - road_depression
+    - mud_patch
+    - soil_mound
+    - traffic_sign
+  nc: 4
+
+conditions:
+  night_brightness_threshold: 60   # avg pixel brightness below this = night
+  dusty_variance_threshold: 30     # pixel std below this = dusty/hazy

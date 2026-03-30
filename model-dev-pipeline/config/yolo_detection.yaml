@@ -1,0 +1,32 @@
+defaults:
+  - base
+
+model:
+  type: "yolo"
+  task: "detect"
+  weights: "yolov8m.pt"   # pretrained starting point
+
+train:
+  epochs: 100
+  batch: 16
+  imgsz: 640
+  lr0: 0.01
+  lrf: 0.01
+  momentum: 0.937
+  weight_decay: 0.0005
+  warmup_epochs: 3
+  patience: 20            # early stopping
+  save_period: 10         # save checkpoint every N epochs
+  workers: 8
+  device: 0               # GPU device id, "cpu" for CPU
+
+augmentation:
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
+  degrees: 0.0            # no rotation — forward-facing camera
+  translate: 0.1
+  scale: 0.5
+  fliplr: 0.5
+  mosaic: 1.0
+  blur: 0.01              # motion blur from vehicle vibration
