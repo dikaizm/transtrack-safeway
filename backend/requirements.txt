@@ -1,0 +1,24 @@
+# API
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# Task queue
+celery>=5.3.0
+redis>=5.0.0
+
+# Database
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9
+alembic>=1.13.0
+
+# ML inference
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Video processing
+opencv-python-headless>=4.8.0
+numpy>=1.24.0

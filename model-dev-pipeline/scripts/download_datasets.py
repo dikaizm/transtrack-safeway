@@ -72,12 +72,18 @@ def download(api_key: str, dataset_key: str) -> None:
     tmp_dir.mkdir(parents=True, exist_ok=True)
     version.download(cfg["format"], location=str(tmp_dir))
 
-    # Roboflow extracts into a subdirectory — find it
-    subdirs = [d for d in tmp_dir.iterdir() if d.is_dir()]
-    if not subdirs:
-        print(f"Error: no subdirectory found inside {tmp_dir}")
-        sys.exit(1)
-    extracted = subdirs[0]
+    # Roboflow may extract into a subdirectory OR directly into tmp_dir.
+    # Detect which layout was used by checking for train/valid directly in tmp_dir.
+    if (tmp_dir / "train").exists() or (tmp_dir / "valid").exists():
+        extracted = tmp_dir          # files landed directly in tmp_dir
+    else:
+        subdirs = [d for d in tmp_dir.iterdir() if d.is_dir()]
+        if not subdirs:
+            print(f"Error: no dataset files found inside {tmp_dir}")
+            sys.exit(1)
+        extracted = subdirs[0]       # files are inside a single subdirectory
+
+    print(f"  Extracted root: {extracted}")
 
     # Move splits into dest, renaming "valid" → "val"
     dest.mkdir(parents=True, exist_ok=True)
