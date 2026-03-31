@@ -1,8 +1,8 @@
 """
-Download datasets from Roboflow in YOLOv8 format.
+Download datasets from Roboflow.
 
 Usage:
-    python scripts/download_datasets.py --api-key <key>
+    python scripts/download_datasets.py --api-key <key>             # all (det=coco, seg=yolo)
     python scripts/download_datasets.py --api-key <key> --dataset seg
     python scripts/download_datasets.py --api-key <key> --dataset det
 """
@@ -21,14 +21,14 @@ DATASETS = {
         "workspace": "stelar",
         "project":   "rdd-mining-road-seg",
         "version":   1,
-        "format":    "yolov8",
+        "format":    "yolov8",      # SegFormer reads YOLO polygon labels
         "dest":      DATA / "segmentation",
     },
     "det": {
         "workspace": "stelar",
         "project":   "rdd-mining-road-det",
         "version":   4,
-        "format":    "yolov8",
+        "format":    "coco",        # RT-DETR reads COCO annotations.json
         "dest":      DATA / "detection",
     },
 }
@@ -93,19 +93,36 @@ def download(api_key: str, dataset_key: str) -> None:
     if extracted != dest and extracted.exists():
         shutil.rmtree(extracted, ignore_errors=True)
 
+    # Roboflow COCO exports use _annotations.coco.json — rename to annotations.json
+    if cfg["format"] == "coco":
+        for split in ["train", "val", "test"]:
+            split_dir = dest / split
+            src_ann = split_dir / "_annotations.coco.json"
+            dst_ann = split_dir / "annotations.json"
+            if src_ann.exists() and not dst_ann.exists():
+                src_ann.rename(dst_ann)
+                print(f"  Renamed: {split}/_annotations.coco.json → annotations.json")
+
     # Create per-condition test dir placeholders
+    is_coco = cfg["format"] == "coco"
     for condition in ["day", "wet", "night"]:
-        for sub in ["images", "labels"]:
-            (dest / "test" / condition / sub).mkdir(parents=True, exist_ok=True)
+        (dest / "test" / condition / "images").mkdir(parents=True, exist_ok=True)
+        if not is_coco:
+            (dest / "test" / condition / "labels").mkdir(parents=True, exist_ok=True)
 
     print(f"\nDone. Data ready at: {dest}")
-    print(
+    action_msg = (
         "\n[ACTION REQUIRED] Move test images into condition subdirs:\n"
         f"  {dest}/test/day/images/\n"
         f"  {dest}/test/wet/images/\n"
         f"  {dest}/test/night/images/\n"
-        "  (and matching labels/) — needed for per-condition evaluation."
     )
+    if not is_coco:
+        action_msg += "  (and matching labels/) — needed for per-condition evaluation."
+    else:
+        action_msg += "  Then run: python scripts/generate_coco_condition_annotations.py\n"
+        action_msg += "  to generate per-condition annotations.json from the test split."
+    print(action_msg)
 
 
 def main() -> None:

@@ -146,9 +146,14 @@ class COCODetectionDataset(Dataset):
         self.processor = processor
         self.is_train = is_train
 
-        _yolo_to_coco(self.data_dir, classes or [])
-
+        # Resolve annotation file: prefer existing COCO json, fall back to YOLO→COCO conversion
         ann_file = self.data_dir / "annotations.json"
+        roboflow_ann = self.data_dir / "_annotations.coco.json"
+        if not ann_file.exists() and roboflow_ann.exists():
+            roboflow_ann.rename(ann_file)
+        if not ann_file.exists():
+            _yolo_to_coco(self.data_dir, classes or [])
+
         with open(ann_file) as f:
             coco = json.load(f)
 
