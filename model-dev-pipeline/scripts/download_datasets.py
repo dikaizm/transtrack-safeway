@@ -67,21 +67,25 @@ def download(api_key: str, dataset_key: str) -> None:
     project = rf.workspace(cfg["workspace"]).project(cfg["project"])
     version = project.version(cfg["version"])
 
-    # Download to a temp location, then move into our data/ structure
-    tmp_dir = DATA / f"_tmp_{dataset_key}"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    version.download(cfg["format"], location=str(tmp_dir))
+    # Use a dedicated download staging dir under data/
+    download_dir = DATA / "downloads"
+    download_dir.mkdir(parents=True, exist_ok=True)
 
-    # Roboflow may extract into a subdirectory OR directly into tmp_dir.
-    # Detect which layout was used by checking for train/valid directly in tmp_dir.
-    if (tmp_dir / "train").exists() or (tmp_dir / "valid").exists():
-        extracted = tmp_dir          # files landed directly in tmp_dir
+    # Snapshot existing entries so we can detect what Roboflow creates
+    before = set(download_dir.iterdir())
+    version.download(cfg["format"], location=str(download_dir))
+    after  = set(download_dir.iterdir())
+
+    # Find the extracted root — Roboflow may land files directly or in a subdir
+    if (download_dir / "train").exists() or (download_dir / "valid").exists():
+        extracted = download_dir
     else:
-        subdirs = [d for d in tmp_dir.iterdir() if d.is_dir()]
-        if not subdirs:
-            print(f"Error: no dataset files found inside {tmp_dir}")
+        new_dirs = [e for e in (after - before) if e.is_dir()]
+        if not new_dirs:
+            print(f"Error: Roboflow produced no output in {download_dir}")
+            print("Contents:", list(download_dir.iterdir()))
             sys.exit(1)
-        extracted = subdirs[0]       # files are inside a single subdirectory
+        extracted = max(new_dirs, key=lambda p: p.stat().st_mtime)
 
     print(f"  Extracted root: {extracted}")
 
@@ -102,8 +106,8 @@ def download(api_key: str, dataset_key: str) -> None:
         (cond_dir / "images").mkdir(parents=True, exist_ok=True)
         (cond_dir / "labels").mkdir(parents=True, exist_ok=True)
 
-    # Clean up temp dir
-    shutil.rmtree(tmp_dir)
+    # Clean up staging dir
+    shutil.rmtree(download_dir, ignore_errors=True)
 
     print(f"\nDone. Data at: {dest}")
     print(
