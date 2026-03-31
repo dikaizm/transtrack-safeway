@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import yaml
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
@@ -324,13 +324,14 @@ class RTDETRPipeline(BasePipeline):
             optimizer_head     = AdamW(head_params, lr=lr_head, weight_decay=weight_decay)
 
             epochs = self.train_cfg.get("epochs", 100)
-            scheduler_backbone = OneCycleLR(
-                optimizer_backbone, max_lr=lr_backbone,
-                steps_per_epoch=len(train_loader), epochs=epochs,
+            # CosineAnnealingLR: starts at lr, smoothly decays to eta_min over epochs.
+            # Stepped per epoch (not per batch) — avoids OneCycleLR warmup ramp
+            # destroying the pretrained weights on small datasets.
+            scheduler_backbone = CosineAnnealingLR(
+                optimizer_backbone, T_max=epochs, eta_min=lr_backbone * 0.01,
             )
-            scheduler_head = OneCycleLR(
-                optimizer_head, max_lr=lr_head,
-                steps_per_epoch=len(train_loader), epochs=epochs,
+            scheduler_head = CosineAnnealingLR(
+                optimizer_head, T_max=epochs, eta_min=lr_head * 0.01,
             )
 
             output_dir = Path(self.train_cfg.get("output_dir", "runs/rtdetr"))
@@ -361,10 +362,10 @@ class RTDETRPipeline(BasePipeline):
                     )
                     optimizer_backbone.step()
                     optimizer_head.step()
-                    scheduler_backbone.step()
-                    scheduler_head.step()
                     train_loss += loss.item()
 
+                scheduler_backbone.step()
+                scheduler_head.step()
                 avg_train_loss = train_loss / len(train_loader)
 
                 # --- Validate ---
