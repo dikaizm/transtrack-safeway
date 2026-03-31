@@ -314,20 +314,22 @@ class RTDETRPipeline(BasePipeline):
             )
             model.to(device)
 
-            optimizer = AdamW(
-                [
-                    {"params": model.model.backbone.parameters(),
-                     "lr": self.train_cfg.get("lr_backbone", 1e-5)},
-                    {"params": [p for n, p in model.named_parameters()
-                                if "backbone" not in n],
-                     "lr": self.train_cfg.get("lr", 1e-4)},
-                ],
-                weight_decay=self.train_cfg.get("weight_decay", 1e-4),
-            )
+            lr_backbone  = float(self.train_cfg.get("lr_backbone", 1e-5))
+            lr_head      = float(self.train_cfg.get("lr", 1e-4))
+            weight_decay = float(self.train_cfg.get("weight_decay", 1e-4))
+
+            head_params = [p for n, p in model.named_parameters() if "backbone" not in n]
+            optimizer_backbone = AdamW(model.model.backbone.parameters(),
+                                       lr=lr_backbone, weight_decay=weight_decay)
+            optimizer_head     = AdamW(head_params, lr=lr_head, weight_decay=weight_decay)
 
             epochs = self.train_cfg.get("epochs", 100)
-            scheduler = OneCycleLR(
-                optimizer, max_lr=self.train_cfg.get("lr", 1e-4),
+            scheduler_backbone = OneCycleLR(
+                optimizer_backbone, max_lr=lr_backbone,
+                steps_per_epoch=len(train_loader), epochs=epochs,
+            )
+            scheduler_head = OneCycleLR(
+                optimizer_head, max_lr=lr_head,
                 steps_per_epoch=len(train_loader), epochs=epochs,
             )
 
@@ -350,14 +352,17 @@ class RTDETRPipeline(BasePipeline):
                     outputs = model(pixel_values=pixel_values, labels=labels)
                     loss = outputs.loss
 
-                    optimizer.zero_grad()
+                    optimizer_backbone.zero_grad()
+                    optimizer_head.zero_grad()
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(
                         model.parameters(),
                         self.train_cfg.get("gradient_clip", 0.1),
                     )
-                    optimizer.step()
-                    scheduler.step()
+                    optimizer_backbone.step()
+                    optimizer_head.step()
+                    scheduler_backbone.step()
+                    scheduler_head.step()
                     train_loss += loss.item()
 
                 avg_train_loss = train_loss / len(train_loader)
