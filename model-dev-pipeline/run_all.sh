@@ -20,10 +20,15 @@
 
 set -euo pipefail
 
+# Load .env if present
+if [[ -f "$(dirname "$0")/.env" ]]; then
+    set -a; source "$(dirname "$0")/.env"; set +a
+fi
+
 # --------------------------------------------------------------------------- #
 # Parse args
 # --------------------------------------------------------------------------- #
-API_KEY=""
+API_KEY="${ROBOFLOW_API_KEY:-}"
 RUN_NAME="v1"
 
 while [[ $# -gt 0 ]]; do

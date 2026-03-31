@@ -7,3 +7,5 @@ runs/
 yolov8m-seg.pt
 model-dev-pipeline/ssh/
 .DS_Store
+.env
+model-dev-pipeline/.env
