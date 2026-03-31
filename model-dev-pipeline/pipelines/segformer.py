@@ -574,6 +574,9 @@ class SegFormerPipeline(BasePipeline):
                 std  = np.array([0.229, 0.224, 0.225])
                 img  = pixel_values.permute(1, 2, 0).numpy()
                 img  = np.clip((img * std + mean) * 255, 0, 255).astype(np.uint8)
+                # SegformerImageProcessor resizes to 512 internally; upsample to img_size
+                if img.shape[0] != img_size or img.shape[1] != img_size:
+                    img = cv2.resize(img, (img_size, img_size), interpolation=cv2.INTER_LINEAR)
 
                 def _overlay(base, mask):
                     out = base.copy()
