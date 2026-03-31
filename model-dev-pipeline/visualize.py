@@ -14,8 +14,11 @@ Usage:
     python visualize.py --config config/yolo_segmentation.yaml --model runs/train/weights/best.pt
     python visualize.py --config config/yolo_detection.yaml   --model best.pt --conditions day night
 
-    # From a raw MP4 video
+    # From a single raw MP4 (no annotations needed — real-world inference)
     python visualize.py --config config/yolo_detection.yaml --model best.pt --source-video clip.mp4
+
+    # From a directory of raw MP4s (no annotations needed — batch real-world inference)
+    python visualize.py --config config/yolo_detection.yaml --model best.pt --source-dir data/test_videos/
 
     # Tune output
     python visualize.py --config config/yolo_detection.yaml --model best.pt --fps 3 --n-samples 60
@@ -202,6 +205,7 @@ def run_visualization(
     conditions: list[str],
     n_samples: int,
     source_video: str | None,
+    source_dir: str | None,
     run_name: str,
     out_dir: Path,
     fps: int,
@@ -258,18 +262,35 @@ def run_visualization(
                 except Exception as e:
                     print(f"  GDrive upload failed (non-fatal): {e}")
 
-        if source_video:
-            # Single raw video — run inference on every frame
-            video_path = Path(source_video)
-            print(f"\nRunning inference on video: {video_path.name}")
-            frames, w, h, orig_fps = annotate_video(
-                model, video_path, task, imgsz, device, conf
-            )
-            frames = [burn_condition_label(f, "custom", task) for f in frames]
-            out_path = out_dir / f"result_{video_path.stem}.mp4"
-            write_video(frames, out_path, fps or orig_fps)
-            print(f"  Saved: {out_path} ({len(frames)} frames @ {fps}fps)")
-            _upload_video(out_path, f"gdrive_vis_{task}_custom")
+        if source_video or source_dir:
+            # Real-world inference on raw videos — no annotations required
+            video_files: list[Path] = []
+            if source_video:
+                video_files = [Path(source_video)]
+            else:
+                src = Path(source_dir)
+                video_files = sorted(
+                    f for f in src.iterdir()
+                    if f.suffix.lower() in {".mp4", ".avi", ".mov", ".mkv", ".ts", ".webm"}
+                )
+                if not video_files:
+                    print(f"No video files found in {src}")
+                else:
+                    print(f"Found {len(video_files)} video(s) in {src}")
+
+            for video_path in video_files:
+                print(f"\nRunning inference on video: {video_path.name}")
+                frames, w, h, orig_fps = annotate_video(
+                    model, video_path, task, imgsz, device, conf
+                )
+                if not frames:
+                    print(f"  No frames extracted, skipping.")
+                    continue
+                frames = [burn_condition_label(f, video_path.stem, task) for f in frames]
+                out_path = out_dir / f"result_{video_path.stem}.mp4"
+                write_video(frames, out_path, fps or orig_fps)
+                print(f"  Saved: {out_path.name} ({len(frames)} frames @ {fps or orig_fps}fps)")
+                _upload_video(out_path, f"gdrive_vis_{task}_{video_path.stem}")
 
         else:
             # Per-condition test image dirs
@@ -315,7 +336,9 @@ def main():
                         choices=["all", "day", "wet", "night"],
                         help="Conditions to visualize (default: day wet night)")
     parser.add_argument("--source-video", default=None,
-                        help="Raw MP4 input — run inference on every frame instead of test dirs")
+                        help="Single raw MP4 — run inference on every frame (no annotations needed)")
+    parser.add_argument("--source-dir", default=None,
+                        help="Directory of raw MP4/AVI/MOV videos — batch real-world inference (no annotations needed)")
     parser.add_argument("--n-samples", type=int, default=60,
                         help="Max frames to sample from test images per condition (default: 60)")
     parser.add_argument("--fps",      type=int, default=DEFAULT_FPS,
@@ -347,6 +370,8 @@ def main():
     print(f"Model        : {model_path}")
     if args.source_video:
         print(f"Source video : {args.source_video}")
+    elif args.source_dir:
+        print(f"Source dir   : {args.source_dir}")
     else:
         print(f"Conditions   : {conditions}")
         print(f"Frames/cond  : {args.n_samples}")
@@ -361,6 +386,7 @@ def main():
         conditions=conditions,
         n_samples=args.n_samples,
         source_video=args.source_video,
+        source_dir=args.source_dir,
         run_name=run_name,
         out_dir=out_dir,
         fps=args.fps,
