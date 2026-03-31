@@ -20,10 +20,9 @@ import numpy as np
 import torch
 import yaml
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
-from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
+from transformers import RTDetrForObjectDetection, RTDetrImageProcessor, get_cosine_schedule_with_warmup
 
 from pipelines.base import BasePipeline
 from pipelines.registry import register_pipeline
@@ -160,10 +159,17 @@ class COCODetectionDataset(Dataset):
         self.images = {img["id"]: img for img in coco["images"]}
         self.image_ids = [img["id"] for img in coco["images"]]
 
-        # Group annotations by image id
+        # Roboflow COCO exports use 1-indexed category IDs; remap to 0-indexed
+        # so they match the model's id2label={0: class0, 1: class1, ...}.
+        cat_ids = sorted({c["id"] for c in coco.get("categories", [])})
+        cat_id_remap = {old: new for new, old in enumerate(cat_ids)}
+
+        # Group annotations by image id, applying the category remap
         self.annotations: dict[int, list] = {id_: [] for id_ in self.image_ids}
         for ann in coco.get("annotations", []):
-            self.annotations[ann["image_id"]].append(ann)
+            remapped = dict(ann)
+            remapped["category_id"] = cat_id_remap.get(ann["category_id"], ann["category_id"])
+            self.annotations[ann["image_id"]].append(remapped)
 
         self.transform = self._build_transform(aug_cfg or {}) if is_train else None
 
@@ -314,25 +320,34 @@ class RTDETRPipeline(BasePipeline):
             )
             model.to(device)
 
-            lr_backbone  = float(self.train_cfg.get("lr_backbone", 1e-5))
-            lr_head      = float(self.train_cfg.get("lr", 1e-4))
-            weight_decay = float(self.train_cfg.get("weight_decay", 1e-4))
+            lr_backbone    = float(self.train_cfg.get("lr_backbone", 1e-5))
+            lr_transformer = float(self.train_cfg.get("lr_transformer", 5e-5))
+            lr_head        = float(self.train_cfg.get("lr", 1e-4))
+            weight_decay   = float(self.train_cfg.get("weight_decay", 1e-4))
 
-            head_params = [p for n, p in model.named_parameters() if "backbone" not in n]
-            optimizer_backbone = AdamW(model.model.backbone.parameters(),
-                                       lr=lr_backbone, weight_decay=weight_decay)
-            optimizer_head     = AdamW(head_params, lr=lr_head, weight_decay=weight_decay)
+            # 3 param groups: backbone (pretrained, lowest lr) /
+            # transformer encoder+decoder (pretrained, medium lr) /
+            # class heads (randomly reinit, highest lr)
+            RANDOM_HEAD_KEYS = {"enc_score_head", "class_embed", "denoising_class_embed"}
+            backbone_params    = list(model.model.backbone.parameters())
+            head_params        = [p for n, p in model.named_parameters()
+                                  if any(k in n for k in RANDOM_HEAD_KEYS)]
+            transformer_params = [p for n, p in model.named_parameters()
+                                  if "backbone" not in n
+                                  and not any(k in n for k in RANDOM_HEAD_KEYS)]
 
-            epochs = self.train_cfg.get("epochs", 100)
-            # CosineAnnealingLR: starts at lr, smoothly decays to eta_min over epochs.
-            # Stepped per epoch (not per batch) — avoids OneCycleLR warmup ramp
-            # destroying the pretrained weights on small datasets.
-            scheduler_backbone = CosineAnnealingLR(
-                optimizer_backbone, T_max=epochs, eta_min=lr_backbone * 0.01,
-            )
-            scheduler_head = CosineAnnealingLR(
-                optimizer_head, T_max=epochs, eta_min=lr_head * 0.01,
-            )
+            optimizer_backbone    = AdamW(backbone_params,    lr=lr_backbone,    weight_decay=weight_decay)
+            optimizer_transformer = AdamW(transformer_params, lr=lr_transformer, weight_decay=weight_decay)
+            optimizer_head        = AdamW(head_params,        lr=lr_head,        weight_decay=weight_decay)
+
+            epochs        = self.train_cfg.get("epochs", 100)
+            total_steps   = len(train_loader) * epochs
+            warmup_steps  = min(int(self.train_cfg.get("warmup_steps", 500)), total_steps // 10)
+
+            # Linear warmup → cosine decay, stepped per batch
+            scheduler_backbone    = get_cosine_schedule_with_warmup(optimizer_backbone,    warmup_steps, total_steps)
+            scheduler_transformer = get_cosine_schedule_with_warmup(optimizer_transformer, warmup_steps, total_steps)
+            scheduler_head        = get_cosine_schedule_with_warmup(optimizer_head,        warmup_steps, total_steps)
 
             output_dir = Path(self.train_cfg.get("output_dir", "runs/rtdetr"))
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -354,18 +369,20 @@ class RTDETRPipeline(BasePipeline):
                     loss = outputs.loss
 
                     optimizer_backbone.zero_grad()
+                    optimizer_transformer.zero_grad()
                     optimizer_head.zero_grad()
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(
                         model.parameters(),
-                        self.train_cfg.get("gradient_clip", 0.1),
+                        self.train_cfg.get("gradient_clip", 1.0),
                     )
                     optimizer_backbone.step()
+                    optimizer_transformer.step()
                     optimizer_head.step()
+                    scheduler_backbone.step()
+                    scheduler_transformer.step()
+                    scheduler_head.step()
                     train_loss += loss.item()
-
-                scheduler_backbone.step()
-                scheduler_head.step()
                 avg_train_loss = train_loss / len(train_loader)
 
                 # --- Validate ---
