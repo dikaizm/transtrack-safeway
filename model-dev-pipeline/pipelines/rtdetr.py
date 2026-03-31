@@ -477,18 +477,16 @@ class RTDETRPipeline(BasePipeline):
         with torch.no_grad():
             for pixel_values, labels in loader:
                 pixel_values = pixel_values.to(device)
+                B, _, H, W = pixel_values.shape
 
                 outputs = model(pixel_values=pixel_values)
 
-                # Post-process predictions
-                orig_sizes = torch.stack(
-                    [torch.tensor([pixel_values.shape[-2], pixel_values.shape[-1]])]
-                    * pixel_values.shape[0]
-                )
+                # Post-process predictions → absolute [x1,y1,x2,y2] in H×W pixel space
+                orig_sizes = torch.tensor([[H, W]], dtype=torch.long).repeat(B, 1)
                 results = processor.post_process_object_detection(
                     outputs,
-                    threshold=0.0,   # use all predictions; torchmetrics handles threshold
-                    target_sizes=orig_sizes.to(device),
+                    threshold=0.0,
+                    target_sizes=orig_sizes,
                 )
 
                 preds = [
@@ -499,13 +497,22 @@ class RTDETRPipeline(BasePipeline):
                     }
                     for r in results
                 ]
-                targets = [
-                    {
-                        "boxes": lbl["boxes"].cpu(),
+
+                # RTDetrImageProcessor encodes targets as normalized [cx,cy,w,h].
+                # Convert to absolute [x1,y1,x2,y2] to match prediction format.
+                targets = []
+                for lbl in labels:
+                    boxes = lbl["boxes"].cpu().float()   # normalized [cx,cy,w,h]
+                    if boxes.numel() > 0:
+                        cx, cy, bw, bh = boxes[:, 0] * W, boxes[:, 1] * H, boxes[:, 2] * W, boxes[:, 3] * H
+                        boxes_xyxy = torch.stack([cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], dim=1)
+                    else:
+                        boxes_xyxy = torch.zeros((0, 4))
+                    targets.append({
+                        "boxes": boxes_xyxy,
                         "labels": lbl["class_labels"].cpu(),
-                    }
-                    for lbl in labels
-                ]
+                    })
+
                 metric.update(preds, targets)
 
         result = metric.compute()
