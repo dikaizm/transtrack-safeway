@@ -83,7 +83,7 @@ Road Damage Detection.
 | Task | Project | Version | Format |
 |---|---|---|---|
 | Segmentation | `stelar/rdd-mining-road-seg` | v1 | yolov8 |
-| Detection | `stelar/rdd-mining-road-det` | v2 | yolov8 |
+| Detection | `stelar/rdd-mining-road-det` | v4 | yolov8 |
 
 Download:
 ```bash
@@ -148,12 +148,12 @@ Celery Worker (Redis broker)
   │      dusty/hazy  → CLAHE LAB (clipLimit=2.0)
   │      normal day  → no preprocessing
   │
-  ├─ 4. Road Segmentation  [YOLOv8n-seg — production]
+  ├─ 4. Road Segmentation  [YOLOv8n-seg · seg-v1 · mAP@50=0.995]
   │      2 classes: drive_area / off_road
   │      → drive_area mask used as region-of-interest filter for hazard detection
   │      → night fallback: if mask confidence low → use center-frame polygon
   │
-  ├─ 5. Safety Hazard Detection  [YOLOv8m — production]
+  ├─ 5. Safety Hazard Detection  [YOLOv8m · det-v2 (v4 dataset) · mAP@50≈0.906]
   │      road_depression:  inside drive_area mask only
   │      mud_patch:        inside drive_area mask only
   │                        suppressed if road area pixel variance < threshold
@@ -197,6 +197,39 @@ Trained on the same dataset for performance comparison. Use these if AGPL-3.0 li
 
 - **AGPL-3.0 (YOLOv8)**: If deployed as a network service (SaaS), the source code must be made available. Confirm with legal before commercial deployment or switch to Apache-2.0 alternatives.
 - **Apache 2.0 (SegFormer, RT-DETR)**: Permissive — safe for commercial deployment without source disclosure.
+
+### 5.4 Training Results
+
+#### Segmentation — YOLOv8n-seg (run: `seg-v1`, dataset: v1)
+
+| Metric | Value |
+|---|---|
+| mAP@50 (Box) | **0.9950** |
+| mAP@50-95 (Box) | 0.8954 |
+| mAP@50 (Mask) | **0.9950** |
+| mAP@50-95 (Mask) | 0.8138 |
+| Precision | 0.9920 |
+| Recall | 1.0000 |
+
+MLflow run: [`seg-v1`](https://mlflow-geoai.stelarea.com/#/experiments/30/runs/f4b623dbdb754583be1236f6ab495cb2)
+
+#### Detection — YOLOv8m (run: `det-v1`, dataset: v3)
+
+| Metric | Value |
+|---|---|
+| mAP@50 | **0.9064** |
+| mAP@50-95 | 0.5544 |
+| Precision | 0.8739 |
+| Recall | 0.8361 |
+
+MLflow run: [`det-v1`](https://mlflow-geoai.stelarea.com/#/experiments/30/runs/ae9fbdd196314d24b92e0e25cdda070c)  
+Weights (GDrive): https://drive.google.com/file/d/172tQOkwb-djOquHY0iHQ-HwL_cYH9T1I/view
+
+> **Note:** `mud_patch` had zero instances in the val split — all wet-condition clips landed in train. Val mAP is effectively 3-class. Per-condition test evaluation on `test/wet/` is required to measure `mud_patch` performance.
+
+#### Detection — YOLOv8m (run: `det-v2`, dataset: v4) — *training in progress*
+
+Re-training with updated dataset v4 which adds `mud_patch` examples to the val split.
 
 ---
 
@@ -352,13 +385,14 @@ python visualize.py --config config/yolo_detection.yaml --model best.pt --source
 ## 10. Build Order
 
 ```
-1. Annotate dataset in Roboflow (detection + segmentation)
-2. Download datasets: python scripts/download_datasets.py --api-key <key>
-3. Distribute test images into test/day/, test/wet/, test/night/
-4. Run full training pipeline: bash run_all.sh --api-key <key> --run-name v1
-5. Compare model results in MLflow (YOLOv8 vs Apache 2.0 alternatives)
-6. Select best models for production (segmentation + detection)
-7. Deploy weights to backend: update model_segmentation_weights + model_detection_weights in config.py
-8. End-to-end integration test with sample dashcam clips
-9. Per-condition threshold tuning
+[✓] 1. Annotate dataset in Roboflow (detection v4 + segmentation v1)
+[✓] 2. Download datasets: python scripts/download_datasets.py --api-key <key>
+[ ] 3. Distribute test images into test/day/, test/wet/, test/night/
+[✓] 4. Train segmentation: seg-v1 (YOLOv8n-seg, mAP@50=0.995) — DONE
+[~] 5. Train detection: det-v2 (YOLOv8m, dataset v4) — IN PROGRESS
+[ ] 6. Compare model results in MLflow (YOLOv8 vs Apache 2.0 alternatives)
+[ ] 7. Select best models for production (segmentation + detection)
+[ ] 8. Deploy weights to backend: update model_segmentation_weights + model_detection_weights in config.py
+[ ] 9. End-to-end integration test with sample dashcam clips
+[ ] 10. Per-condition threshold tuning
 ```
