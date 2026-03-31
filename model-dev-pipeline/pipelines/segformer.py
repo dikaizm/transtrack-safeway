@@ -257,19 +257,18 @@ class SegFormerPipeline(BasePipeline):
             )
             model.to(device)
 
-            optimizer = AdamW(
-                [
-                    {"params": model.segformer.encoder.parameters(),
-                     "lr": self.train_cfg.get("lr_backbone", 6e-5)},
-                    {"params": model.decode_head.parameters(),
-                     "lr": self.train_cfg.get("lr", 6e-4)},
-                ],
-                weight_decay=self.train_cfg.get("weight_decay", 0.01),
-                foreach=False,
-            )
-            scheduler = PolynomialLR(
-                optimizer, total_iters=epochs, power=0.9,
-            )
+            weight_decay = float(self.train_cfg.get("weight_decay", 0.01))
+            lr_backbone  = float(self.train_cfg.get("lr_backbone", 6e-5))
+            lr_head      = float(self.train_cfg.get("lr", 6e-4))
+
+            # Two separate optimizers avoids a PyTorch bug where lr is passed
+            # as a list to _single_tensor_adam when param groups share device/dtype.
+            optimizer_enc = AdamW(model.segformer.encoder.parameters(),
+                                  lr=lr_backbone, weight_decay=weight_decay)
+            optimizer_dec = AdamW(model.decode_head.parameters(),
+                                  lr=lr_head, weight_decay=weight_decay)
+            scheduler_enc = PolynomialLR(optimizer_enc, total_iters=epochs, power=0.9)
+            scheduler_dec = PolynomialLR(optimizer_dec, total_iters=epochs, power=0.9)
 
             output_dir = Path(self.train_cfg.get("output_dir", "runs/segformer"))
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -289,16 +288,19 @@ class SegFormerPipeline(BasePipeline):
                     outputs = model(pixel_values=pixel_values, labels=labels)
                     loss    = outputs.loss
 
-                    optimizer.zero_grad()
+                    optimizer_enc.zero_grad()
+                    optimizer_dec.zero_grad()
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(
                         model.parameters(),
                         self.train_cfg.get("gradient_clip", 1.0),
                     )
-                    optimizer.step()
+                    optimizer_enc.step()
+                    optimizer_dec.step()
                     train_loss += loss.item()
 
-                scheduler.step()
+                scheduler_enc.step()
+                scheduler_dec.step()
                 avg_loss = train_loss / len(train_loader)
 
                 # ── Validate ───────────────────────────────────────────
