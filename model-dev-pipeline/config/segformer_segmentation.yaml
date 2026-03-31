@@ -17,30 +17,21 @@ data:
   nc: 2
 
 model:
-  type: "yolo"
+  type: "segformer"
   task: "segment"
-  weights: "yolov8n-seg.pt"   # nano — 2-class task, doesn't need large model
+  checkpoint: "nvidia/mit-b0"   # Apache 2.0 — Mix Transformer encoder, lightest variant
 
 train:
   epochs: 100
-  batch: 16
+  batch: 8
   imgsz: 640
-  lr0: 0.01
-  lrf: 0.01
-  momentum: 0.937
-  weight_decay: 0.0005
-  warmup_epochs: 3
+  lr: 6e-4             # decode head learning rate
+  lr_backbone: 6e-5    # encoder learning rate (10x lower — pretrained)
+  weight_decay: 0.01
+  gradient_clip: 1.0
   patience: 20
-  save_period: 10
-  workers: 8
-  device: 0
+  workers: 4
+  output_dir: "runs/segformer"
 
 augmentation:
-  hsv_h: 0.015
-  hsv_s: 0.5
-  hsv_v: 0.4
-  degrees: 0.0
-  translate: 0.1
-  scale: 0.5
-  fliplr: 0.5
-  mosaic: 1.0
+  fliplr: 0.5          # horizontal flip probability

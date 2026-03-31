@@ -46,4 +46,3 @@ augmentation:
   scale: 0.5
   fliplr: 0.5
   mosaic: 1.0
-  blur: 0.01              # motion blur from vehicle vibration

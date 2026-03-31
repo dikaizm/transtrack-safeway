@@ -101,7 +101,6 @@ class YOLOPipeline(BasePipeline):
                     scale=self.aug_cfg.get("scale", 0.5),
                     fliplr=self.aug_cfg.get("fliplr", 0.5),
                     mosaic=self.aug_cfg.get("mosaic", 1.0),
-                    blur=self.aug_cfg.get("blur", 0.01),
                     project="runs/train",
                     exist_ok=True,
                 )
