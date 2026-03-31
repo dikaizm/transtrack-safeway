@@ -327,37 +327,46 @@ class YOLOPipeline(BasePipeline):
 
         def on_train_epoch_end(trainer):
             epoch = trainer.epoch
-            # Loss values (box_loss, cls_loss, dfl_loss / seg_loss)
-            loss_metrics = {
-                f"train/{k}": float(v)
-                for k, v in trainer.label_loss_items(trainer.tloss, prefix="train").items()
-                if isinstance(v, (int, float))
-            }
+            metrics: dict[str, float] = {}
+
+            # Loss values
+            try:
+                loss_items = trainer.label_loss_items(trainer.tloss, prefix="train")
+                metrics.update({
+                    k: float(v) for k, v in loss_items.items()
+                    if isinstance(v, (int, float))
+                })
+            except Exception:
+                pass
+
             # Learning rate
-            lr_metrics = {
-                f"lr/pg{i}": float(v)
-                for i, v in enumerate(
-                    [pg["lr"] for pg in trainer.optimizer.param_groups]
-                )
-            }
-            mlflow.log_metrics({**loss_metrics, **lr_metrics}, step=epoch)
+            try:
+                for i, pg in enumerate(trainer.optimizer.param_groups):
+                    metrics[f"lr/pg{i}"] = float(pg["lr"])
+            except Exception:
+                pass
 
-            # Verbose epoch summary to stdout (captured by _tee_log → MLflow)
-            loss_str = "  ".join(f"{k}={v:.4f}" for k, v in loss_metrics.items())
-            lr_str = "  ".join(f"{k}={v:.6f}" for k, v in lr_metrics.items())
-            print(f"[Epoch {epoch+1}] {loss_str}  |  {lr_str}")
+            if metrics:
+                mlflow.log_metrics(metrics, step=epoch)
+                summary = "  ".join(f"{k}={v:.4f}" for k, v in metrics.items())
+                print(f"[Epoch {epoch+1}] {summary}")
 
-        def on_val_end(trainer):
+        def on_val_end(validator):
+            # validator.metrics is a SegmentMetrics/DetMetrics object — use results_dict
+            try:
+                raw = validator.metrics.results_dict
+            except AttributeError:
+                return
             val_metrics = {
                 f"val/{k}": float(v)
-                for k, v in trainer.metrics.items()
+                for k, v in raw.items()
                 if isinstance(v, (int, float))
             }
-            mlflow.log_metrics(val_metrics, step=trainer.epoch)
+            step = getattr(validator, "epoch", None)
+            mlflow.log_metrics(val_metrics, step=step)
 
-            # Print val summary
             metrics_str = "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items())
-            print(f"[Val   {trainer.epoch+1}] {metrics_str}")
+            print(f"[Val] {metrics_str}")
 
         model.add_callback("on_train_epoch_end", on_train_epoch_end)
         model.add_callback("on_val_end", on_val_end)

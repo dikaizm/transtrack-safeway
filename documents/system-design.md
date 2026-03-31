@@ -14,7 +14,7 @@ Road Damage Detection.
 
 ## 2. Label Set
 
-### 2.1 Final Classes (4)
+### 2.1 Detection Classes (4)
 
 | Label | Definition | Detection Zone |
 |---|---|---|
@@ -27,17 +27,17 @@ Road Damage Detection.
 
 | Label | Definition | Annotation Rule |
 |---|---|---|
-| `drive_area` | The navigable road surface where the haul truck is expected to travel. Includes the full width of the graded dirt/gravel road surface, road shoulders that are physically passable, and areas between ruts. | Label the continuous drivable surface from edge to edge. Include the road body even if wet, muddy, or rutted — the surface condition is handled by the detection model, not the segmentation. Dilate mask ~20px inward from road edges to absorb boundary ambiguity. |
-| `off_road` | Everything outside the navigable road surface: road-side embankments, drainage ditches, vegetation, rock walls, sky, and any other non-drivable terrain. | Label any region not covered by `drive_area`. Sky is left unlabeled (background class) — do not mask it as `off_road`. |
+| `drive_area` | The navigable road surface where the haul truck is expected to travel. Includes the full width of the graded dirt/gravel road surface, road shoulders that are physically passable, and areas between ruts. | Label the continuous drivable surface from edge to edge. Include the road body even if wet, muddy, or rutted — surface condition is handled by the detection model. Dilate mask ~20px inward from road edges to absorb boundary ambiguity. |
+| `off_road` | Everything outside the navigable road surface: road-side embankments, drainage ditches, vegetation, rock walls, and any other non-drivable terrain. | Implicit complement of `drive_area`. Annotate `drive_area` only — `off_road` is inferred. Sky and distant background → leave as unlabeled background. |
 
 **Key rules:**
 - One road per frame — `drive_area` is a single connected region in most frames.
-- Do **not** label `off_road` separately; it is the implicit complement of `drive_area`. Annotate `drive_area` only.
+- Do **not** label `off_road` separately; annotate `drive_area` only.
 - Sky and distant background → leave as unlabeled background, not `off_road`.
 
 ---
 
-### 2.4 Annotation Rules (Detection)
+### 2.3 Annotation Rules (Detection)
 
 - **`road_depression`**: Label based on visible cavity edges and shadow. If the depression is filled with mud/water but the rim is still visible → label as `road_depression`. If no structural edge is visible → label as `mud_patch`.
 - **`mud_patch`**: Only label when the wet/muddy area is locally distinct from surrounding road surface. If the entire road is uniformly wet → do **not** label anything.
@@ -45,14 +45,14 @@ Road Damage Detection.
 - **`traffic_sign`**: Label the sign board itself, not the pole.
 - **Ambiguous cases**: Skip the frame. A skipped ambiguous frame is better than a noisy label.
 
-### 2.5 Rationale for Design Decisions
+### 2.4 Rationale for Design Decisions
 
 | Decision | Reason |
 |---|---|
 | `pothole` replaced by `road_depression` | "Pothole" implies paved asphalt context. "Depression" is accurate for unpaved dirt road cavities. |
 | `mud_patch` kept separate from `road_depression` | Different cause (environmental vs structural), different risk (traction loss vs vehicle damage), different remediation action. |
 | `traffic_sign` included | Mining safety compliance — speed zones, hazard warnings. Signs are detected full-frame, not constrained to road area. |
-| `pothole` not merged with `mud_patch` | Distinct safety implications and remediation actions justify separation despite visual similarity in wet conditions. |
+| Vehicle detection removed | `drive_area` mask + temporal smoothing (≥2/3 frames) is sufficient to suppress haul-truck false positives. Trucks move fast enough to drop out of consecutive frames at 3fps. |
 
 ---
 
@@ -72,17 +72,34 @@ Road Damage Detection.
 
 ### 3.2 Conditions Coverage
 
-| Condition | Clips | Status |
-|---|---|---|
-| Dry daytime | ~85 | Sufficient — label and train |
-| Wet daytime | ~8 | Need more — collect or augment |
-| Night | ~8 | Preprocess with CLAHE before labeling |
+| Condition | Clips | Annotation FPS | Status |
+|---|---|---|---|
+| Dry daytime | ~85 | 1fps | Sufficient — label and train |
+| Wet daytime | ~8 | 2fps | Need more — collect or augment |
+| Night | ~8 | 2fps | Preprocess with CLAHE before labeling |
 
-### 3.3 Training Augmentation
+### 3.3 Roboflow Datasets
 
-Apply during training (not at inference) to make the model robust to visual variation:
+| Task | Project | Version | Format |
+|---|---|---|---|
+| Segmentation | `stelar/rdd-mining-road-seg` | v1 | yolov8 |
+| Detection | `stelar/rdd-mining-road-det` | v2 | yolov8 |
+
+Download:
+```bash
+python scripts/download_datasets.py --api-key <key>
+```
+
+### 3.4 Train/Val/Test Split
+
+- Split at **video clip level**, not frame level — prevents temporal leakage
+- **80 / 10 / 10** globally, stratified by condition
+- Test set further split into `test/day/`, `test/wet/`, `test/night/` for per-condition evaluation
+
+### 3.5 Training Augmentation
 
 ```yaml
+# YOLO augmentation (applied during training only)
 hsv_h: 0.015      # hue shift — handles lighting variation
 hsv_s: 0.7        # saturation — handles wet vs dry surface
 hsv_v: 0.4        # brightness — handles overcast vs sunny
@@ -91,7 +108,10 @@ translate: 0.1
 scale: 0.5        # scale variation — near vs far objects
 fliplr: 0.5       # horizontal flip
 mosaic: 1.0       # combines 4 frames — YOLOv8 default
-blur: 0.01        # motion blur from vehicle vibration
+
+# SegFormer augmentation
+fliplr: 0.5
+color_jitter: brightness=0.4, contrast=0.4
 ```
 
 ---
@@ -128,12 +148,12 @@ Celery Worker (Redis broker)
   │      dusty/hazy  → CLAHE LAB (clipLimit=2.0)
   │      normal day  → no preprocessing
   │
-  ├─ 4. Road Segmentation  [YOLOv8n-seg — full frame]
+  ├─ 4. Road Segmentation  [YOLOv8n-seg — production]
   │      2 classes: drive_area / off_road
   │      → drive_area mask used as region-of-interest filter for hazard detection
   │      → night fallback: if mask confidence low → use center-frame polygon
   │
-  ├─ 5. Safety Hazard Detection  [YOLOv8m — 4 classes]
+  ├─ 5. Safety Hazard Detection  [YOLOv8m — production]
   │      road_depression:  inside drive_area mask only
   │      mud_patch:        inside drive_area mask only
   │                        suppressed if road area pixel variance < threshold
@@ -157,56 +177,54 @@ Celery Worker (Redis broker)
 
 ## 5. Models
 
-| Stage | Model | Input | Classes | Why |
-|---|---|---|---|---|
-| Road segmentation | YOLOv8n-seg | Full frame | `drive_area`, `off_road` | 2-class task — nano is sufficient; one road per frame |
-| Safety hazard detection | YOLOv8m | Full frame | `road_depression`, `mud_patch`, `soil_mound`, `traffic_sign` | 4 classes, medium balances speed and accuracy |
+### 5.1 Production Models
 
-### Notes
-- All models use the same Ultralytics/YOLO toolchain — consistent training, inference, and export pipeline.
-- Vehicle detection model removed — `drive_area` mask + temporal smoothing (≥2/3 frames) is sufficient to suppress haul-truck false positives.
-- Revisit RF-DETR for the detection stage only if YOLOv8m mAP is insufficient after proper training.
-- YOLOv8 is AGPL-3.0 licensed. If commercial deployment exposes this as a network service, confirm licensing with legal or switch to Apache-2.0 alternatives.
+| Stage | Model | License | Classes | Notes |
+|---|---|---|---|---|
+| Road segmentation | YOLOv8n-seg | AGPL-3.0 | `drive_area`, `off_road` | Nano sufficient for 2-class semantic task; one road per frame |
+| Safety hazard detection | YOLOv8m | AGPL-3.0 | `road_depression`, `mud_patch`, `soil_mound`, `traffic_sign` | Medium balances speed and accuracy for 4-class detection |
+
+### 5.2 Comparative Models (Apache 2.0)
+
+Trained on the same dataset for performance comparison. Use these if AGPL-3.0 licensing is a concern for commercial deployment.
+
+| Stage | Model | License | Source | Notes |
+|---|---|---|---|---|
+| Road segmentation | SegFormer-B0 | Apache 2.0 | `nvidia/mit-b0` (HuggingFace) | Mix Transformer encoder; semantic segmentation; mIoU metric |
+| Safety hazard detection | RT-DETR | Apache 2.0 | `PekingU/rtdetr_r50vd` (HuggingFace) | Real-time detection transformer; ResNet-50 backbone |
+
+### 5.3 Licensing Note
+
+- **AGPL-3.0 (YOLOv8)**: If deployed as a network service (SaaS), the source code must be made available. Confirm with legal before commercial deployment or switch to Apache-2.0 alternatives.
+- **Apache 2.0 (SegFormer, RT-DETR)**: Permissive — safe for commercial deployment without source disclosure.
 
 ---
 
 ## 6. Preprocessing Detail
 
 ```python
-import cv2
-import numpy as np
-
 NIGHT_BRIGHTNESS_THRESHOLD = 60
-DUSTY_VARIANCE_THRESHOLD = 30
-MUD_PATCH_VARIANCE_THRESHOLD = 15  # suppress mud_patch if road is uniformly wet
+DUSTY_VARIANCE_THRESHOLD   = 30
+MUD_PATCH_VARIANCE_THRESHOLD = 15   # suppress mud_patch if road is uniformly wet
 
-def detect_condition(frame: np.ndarray) -> str:
+def detect_condition(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    brightness = gray.mean()
-    variance = gray.std()
-    if brightness < NIGHT_BRIGHTNESS_THRESHOLD:
+    if gray.mean() < NIGHT_BRIGHTNESS_THRESHOLD:
         return "night"
-    if variance < DUSTY_VARIANCE_THRESHOLD:
+    if gray.std() < DUSTY_VARIANCE_THRESHOLD:
         return "dusty"
-    return "normal"
+    return "day"
 
-def apply_clahe(frame: np.ndarray, clip: float) -> np.ndarray:
-    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
-    l = clahe.apply(l)
-    return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
-
-def preprocess(frame: np.ndarray) -> np.ndarray:
+def preprocess_frame(frame):
     condition = detect_condition(frame)
     if condition == "night":
-        return apply_clahe(frame, clip=4.0)
+        return apply_clahe(frame, clip=4.0), condition
     if condition == "dusty":
-        return apply_clahe(frame, clip=2.0)
-    return frame  # normal day — no preprocessing
+        return apply_clahe(frame, clip=2.0), condition
+    return frame, condition   # day — no preprocessing
 ```
 
-**Important:** The same preprocessing applied at inference must be applied identically during training.
+**Important:** The same `preprocess_frame()` function is used at both training time and inference time. Any change here must be applied consistently to both.
 
 ---
 
@@ -219,41 +237,24 @@ Submit a video for analysis.
 
 - **Content-Type:** `multipart/form-data`
 - **Body:** `video` (mp4 file)
-- **Validation (fail-fast before queuing):**
-  - File type: mp4, H.264 or HEVC codec
-  - File size ≤ 50MB
-  - Duration ≤ 120 seconds (probed via ffprobe)
+- **Validation:** file type, size ≤ 50MB, duration ≤ 120s (ffprobe)
 - **Response:** `202 Accepted`
 
 ```json
-{
-  "task_id": "abc123",
-  "frames_to_process": 37
-}
+{ "task_id": "abc123", "frames_to_process": 37 }
 ```
-
----
 
 #### `GET /detect/{task_id}`
-Poll task status.
-
 ```json
-{
-  "task_id": "abc123",
-  "status": "pending | processing | done | failed"
-}
+{ "task_id": "abc123", "status": "pending | processing | done | failed" }
 ```
 
----
-
 #### `GET /detect/{task_id}/result`
-Retrieve results. Only accessible when `status = done`.
-
 ```json
 {
   "task_id": "abc123",
   "status": "done",
-  "conditions": "night | day | dusty",
+  "conditions": "night",
   "frames_analyzed": 37,
   "detections": [
     {
@@ -263,30 +264,6 @@ Retrieve results. Only accessible when `status = done`.
       "confidence": 0.92,
       "bbox": { "x": 45, "y": 210, "w": 40, "h": 55 },
       "zone": "full_frame"
-    },
-    {
-      "frame_index": 14,
-      "frame_sec": 4.67,
-      "class": "mud_patch",
-      "confidence": 0.84,
-      "bbox": { "x": 280, "y": 380, "w": 120, "h": 90 },
-      "zone": "road_area"
-    },
-    {
-      "frame_index": 21,
-      "frame_sec": 7.0,
-      "class": "road_depression",
-      "confidence": 0.81,
-      "bbox": { "x": 310, "y": 300, "w": 95, "h": 75 },
-      "zone": "road_area"
-    },
-    {
-      "frame_index": 25,
-      "frame_sec": 8.33,
-      "class": "soil_mound",
-      "confidence": 0.89,
-      "bbox": { "x": 200, "y": 320, "w": 110, "h": 85 },
-      "zone": "road_area"
     }
   ]
 }
@@ -294,7 +271,7 @@ Retrieve results. Only accessible when `status = done`.
 
 **Field notes:**
 - `frame_sec` — allows downstream consumer to seek to the exact moment in the video
-- `zone` — `road_area` or `full_frame`, indicates which detection context was applied
+- `zone` — `road_area` or `full_frame`
 - `conditions` — lets downstream API weight or flag detections accordingly
 
 ---
@@ -307,16 +284,18 @@ Retrieve results. Only accessible when `status = done`.
 | Task queue | Celery + Redis |
 | Frame extraction | FFmpeg |
 | Video validation | ffprobe |
-| ML inference | Ultralytics (YOLOv8) |
+| ML inference | Ultralytics YOLOv8 (production) / HuggingFace Transformers (comparative) |
 | Result storage | PostgreSQL |
-| Temp video storage | Local disk or MinIO/S3 |
+| Temp video storage | Local disk |
+| Experiment tracking | MLflow (`https://mlflow-geoai.stelarea.com/`) |
+| Model & artifact storage | Google Drive (linked from MLflow tags) |
 
 ### Operational Constraints
 
 | Parameter | Value | Reason |
 |---|---|---|
 | Max file size | 50MB | 10× the largest observed training clip |
-| Max duration | 120s | 3× the longest observed clip — safe buffer |
+| Max duration | 120s | 3× the longest observed clip |
 | Frame sampling | 3fps (time-based) | Sufficient for mining road speeds; ~37 frames avg |
 | Worker timeout | 5 minutes | Covers worst-case 123 frames × multi-stage inference |
 | Task result TTL | 24 hours | Results purged from DB after this period |
@@ -324,25 +303,62 @@ Retrieve results. Only accessible when `status = done`.
 
 ---
 
-## 9. Evaluation Strategy
+## 9. Model Development Pipeline
+
+### 9.1 Training & Evaluation
+
+All models are trained and evaluated through a unified pipeline with MLflow tracking.
+
+```bash
+# Full pipeline: download → train seg → eval seg → train det → eval det
+bash run_all.sh --api-key <roboflow_key> --run-name v1
+
+# Individual training
+python train.py --config config/yolo_segmentation.yaml    --run-name yolo-seg-v1
+python train.py --config config/yolo_detection.yaml       --run-name yolo-det-v1
+python train.py --config config/segformer_segmentation.yaml --run-name segformer-v1
+python train.py --config config/rtdetr_detection.yaml     --run-name rtdetr-v1
+
+# Evaluation (per-condition: day / wet / night)
+python evaluate.py --config config/yolo_detection.yaml --model runs/train/weights/best.pt
+
+# Visual result videos (annotated MP4 per condition)
+python visualize.py --config config/yolo_detection.yaml --model best.pt
+python visualize.py --config config/yolo_detection.yaml --model best.pt --source-video clip.mp4
+```
+
+### 9.2 Artifact Storage
+
+| Artifact | Location |
+|---|---|
+| Metrics, params, logs | MLflow (`transtrack-road-safety` experiment) |
+| Model weights (`best.pt`) | Google Drive → linked as `gdrive_{task}_weights` MLflow tag |
+| Result videos (annotated MP4) | Google Drive → linked as `gdrive_vis_{task}_{condition}` MLflow tag |
+
+### 9.3 Evaluation Strategy
 
 - Evaluate **per-condition** separately: day / wet / night — never aggregate only
-- Evaluate **per-class** mAP: road_depression, mud_patch, soil_mound, traffic_sign
-- Train/val/test split at **video level**, not frame level — prevents temporal leakage
-- Include uniformly wet road frames as **negative examples** for mud_patch
-- Target metric: **mAP@50** per class per condition
+- Evaluate **per-class**: `road_depression`, `mud_patch`, `soil_mound`, `traffic_sign`
+- Split at **video clip level**, not frame level — prevents temporal leakage
+- Include uniformly wet road frames as **negative examples** for `mud_patch`
+
+| Model | Primary metric |
+|---|---|
+| YOLOv8n-seg, SegFormer-B0 | mIoU per class (drive_area, off_road) |
+| YOLOv8m, RT-DETR | mAP@50 per class per condition |
 
 ---
 
 ## 10. Build Order
 
 ```
-1. Finalize and label dataset (4 classes, annotation rules applied)
-2. Train road segmentation model (YOLOv8n-seg)
-3. Train safety hazard detection model (YOLOv8m)
-4. Validate detection quality on sample clips (day, wet, night separately)
-5. Build async API (FastAPI + Celery + Redis)
-6. Integrate full pipeline into worker
-7. End-to-end integration test
-8. Per-condition evaluation and threshold tuning
+1. Annotate dataset in Roboflow (detection + segmentation)
+2. Download datasets: python scripts/download_datasets.py --api-key <key>
+3. Distribute test images into test/day/, test/wet/, test/night/
+4. Run full training pipeline: bash run_all.sh --api-key <key> --run-name v1
+5. Compare model results in MLflow (YOLOv8 vs Apache 2.0 alternatives)
+6. Select best models for production (segmentation + detection)
+7. Deploy weights to backend: update model_segmentation_weights + model_detection_weights in config.py
+8. End-to-end integration test with sample dashcam clips
+9. Per-condition threshold tuning
 ```
