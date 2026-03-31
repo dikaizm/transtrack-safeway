@@ -49,16 +49,89 @@ except ImportError:
 
 
 # ------------------------------------------------------------------ #
+#  YOLO → COCO converter                                               #
+# ------------------------------------------------------------------ #
+
+def _yolo_to_coco(data_dir: Path, classes: list[str]) -> None:
+    """Convert YOLO-format labels to COCO annotations.json in-place.
+
+    YOLO label format (normalized): class_id cx cy w h
+    COCO bbox format (absolute pixels): [x_min, y_min, w, h]
+    """
+    ann_file = data_dir / "annotations.json"
+    if ann_file.exists():
+        return  # already converted
+
+    images_dir = data_dir / "images"
+    labels_dir = data_dir / "labels"
+
+    IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    img_paths = sorted(p for p in images_dir.iterdir() if p.suffix.lower() in IMG_EXTS)
+
+    categories = [{"id": i, "name": name} for i, name in enumerate(classes)]
+    coco_images = []
+    coco_annotations = []
+    ann_id = 0
+
+    for img_id, img_path in enumerate(img_paths):
+        # Get image size without decoding full image when possible
+        if HAS_CV2:
+            import cv2 as _cv2
+            img = _cv2.imread(str(img_path))
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+        else:
+            from PIL import Image as _PILImage
+            with _PILImage.open(img_path) as _im:
+                w, h = _im.size
+
+        coco_images.append({
+            "id": img_id,
+            "file_name": img_path.name,
+            "width": w,
+            "height": h,
+        })
+
+        label_path = labels_dir / (img_path.stem + ".txt")
+        if not label_path.exists():
+            continue
+
+        with open(label_path) as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) != 5:
+                    continue
+                cls_id, cx, cy, bw, bh = int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+                x_min = (cx - bw / 2) * w
+                y_min = (cy - bh / 2) * h
+                abs_w  = bw * w
+                abs_h  = bh * h
+                coco_annotations.append({
+                    "id": ann_id,
+                    "image_id": img_id,
+                    "category_id": cls_id,
+                    "bbox": [x_min, y_min, abs_w, abs_h],
+                    "area": abs_w * abs_h,
+                    "iscrowd": 0,
+                })
+                ann_id += 1
+
+    coco_dict = {"images": coco_images, "annotations": coco_annotations, "categories": categories}
+    with open(ann_file, "w") as f:
+        json.dump(coco_dict, f)
+    print(f"[rtdetr] Generated {ann_file} ({len(coco_images)} images, {len(coco_annotations)} annotations)")
+
+
+# ------------------------------------------------------------------ #
 #  Dataset                                                             #
 # ------------------------------------------------------------------ #
 
 class COCODetectionDataset(Dataset):
     """
     COCO-format dataset compatible with RT-DETR image processor.
-    Expects:
-        data_dir/
-          images/
-          annotations.json   (COCO format)
+    Accepts YOLO-format splits (images/ + labels/) and auto-generates
+    annotations.json on first use.
     """
 
     def __init__(
@@ -67,10 +140,13 @@ class COCODetectionDataset(Dataset):
         processor: RTDetrImageProcessor,
         aug_cfg: dict | None = None,
         is_train: bool = True,
+        classes: list[str] | None = None,
     ):
         self.data_dir = Path(data_dir)
         self.processor = processor
         self.is_train = is_train
+
+        _yolo_to_coco(self.data_dir, classes or [])
 
         ann_file = self.data_dir / "annotations.json"
         with open(ann_file) as f:
@@ -210,10 +286,10 @@ class RTDETRPipeline(BasePipeline):
 
             train_ds = COCODetectionDataset(
                 self.data_cfg["train"], processor,
-                aug_cfg=self.aug_cfg, is_train=True,
+                aug_cfg=self.aug_cfg, is_train=True, classes=classes,
             )
             val_ds = COCODetectionDataset(
-                self.data_cfg["val"], processor, is_train=False,
+                self.data_cfg["val"], processor, is_train=False, classes=classes,
             )
 
             train_loader = DataLoader(
@@ -362,7 +438,8 @@ class RTDETRPipeline(BasePipeline):
                     continue
 
                 print(f"\nEvaluating on condition: {condition}")
-                ds = COCODetectionDataset(data_path, processor, is_train=False)
+                ds = COCODetectionDataset(data_path, processor, is_train=False,
+                                          classes=self.data_cfg.get("classes", []))
                 loader = DataLoader(ds, batch_size=4, collate_fn=collate_fn,
                                     num_workers=self.train_cfg.get("workers", 4))
 
