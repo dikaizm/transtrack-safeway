@@ -1,6 +1,15 @@
 defaults:
   - base
 
+data:
+  train: "data/detection/train"
+  val:   "data/detection/val"
+  test:
+    all:   "data/detection/test"
+    day:   "data/detection/test/day"
+    wet:   "data/detection/test/wet"
+    night: "data/detection/test/night"
+
 model:
   type: "rtdetr"
   task: "detect"
