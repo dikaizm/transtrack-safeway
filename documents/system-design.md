@@ -193,12 +193,42 @@ Trained on the same dataset for performance comparison. Use these if AGPL-3.0 li
 | Road segmentation | SegFormer-B0 | Apache 2.0 | `nvidia/mit-b0` (HuggingFace) | Mix Transformer encoder; semantic segmentation; mIoU metric |
 | Safety hazard detection | RT-DETR | Apache 2.0 | `PekingU/rtdetr_r50vd` (HuggingFace) | Real-time detection transformer; ResNet-50 backbone |
 
-### 5.3 Licensing Note
+### 5.3 Model Parameter Comparison
+
+#### Segmentation: YOLOv8n-seg vs SegFormer-B0
+
+| Property | YOLOv8n-seg | SegFormer-B0 |
+|---|---|---|
+| Parameters | **3.4M** | **3.7M** |
+| GFLOPs (640px) | 12.6 | ~8.4 |
+| Backbone | CSPDarknet (nano) | Mix Transformer (MiT-B0) |
+| Decode head | Segmentation head + bbox | All-MLP lightweight head |
+| Output | Instance masks + bbox | Semantic mask only |
+| Task fit | Instance segmentation | Semantic segmentation |
+| License | AGPL-3.0 | Apache 2.0 |
+
+Both models are comparable in size (~3.5M params). Key difference: YOLOv8n-seg produces **instance masks** (one mask per detected object) while SegFormer produces a **semantic mask** (pixel-wise label across whole image). For `drive_area` segmentation, semantic output is sufficient and SegFormer's All-MLP head is architecturally simpler.
+
+#### Detection: YOLOv8m vs RT-DETR R50
+
+| Property | YOLOv8m | RT-DETR R50 |
+|---|---|---|
+| Parameters | **25.9M** | **42M** |
+| GFLOPs (640px) | 78.9 | ~136 |
+| Backbone | CSPDarknet (medium) | ResNet-50-vd |
+| Neck | PANet FPN | Hybrid Encoder (CNN + Transformer) |
+| Head | Anchor-based | Transformer decoder (bipartite matching) |
+| NMS required | Yes | No (end-to-end) |
+| License | AGPL-3.0 | Apache 2.0 |
+
+RT-DETR is ~1.6× larger and ~1.7× heavier in compute than YOLOv8m. The transformer decoder eliminates NMS post-processing but increases parameter count. On small datasets (≤10K images), YOLOv8m typically converges faster; RT-DETR may need more epochs to saturate.
+
+### 5.4 Licensing Note
 
 - **AGPL-3.0 (YOLOv8)**: If deployed as a network service (SaaS), the source code must be made available. Confirm with legal before commercial deployment or switch to Apache-2.0 alternatives.
 - **Apache 2.0 (SegFormer, RT-DETR)**: Permissive — safe for commercial deployment without source disclosure.
 
-### 5.4 Training Results
+### 5.5 Training Results
 
 #### Segmentation — YOLOv8n-seg (run: `seg-v1`, dataset: v1)
 
