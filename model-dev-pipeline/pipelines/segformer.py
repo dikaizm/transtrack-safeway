@@ -265,6 +265,7 @@ class SegFormerPipeline(BasePipeline):
                      "lr": self.train_cfg.get("lr", 6e-4)},
                 ],
                 weight_decay=self.train_cfg.get("weight_decay", 0.01),
+                foreach=False,
             )
             scheduler = PolynomialLR(
                 optimizer, total_iters=epochs, power=0.9,
