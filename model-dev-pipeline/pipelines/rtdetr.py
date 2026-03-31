@@ -471,7 +471,7 @@ class RTDETRPipeline(BasePipeline):
 
     def _run_val(self, model, loader, processor, device) -> dict[str, float]:
         model.eval()
-        metric = MeanAveragePrecision(iou_type="bbox")
+        metric = MeanAveragePrecision(iou_type="bbox", max_detection_thresholds=[1, 10, 300])
         classes = self.data_cfg["classes"]
 
         with torch.no_grad():
@@ -516,9 +516,12 @@ class RTDETRPipeline(BasePipeline):
             "mAP_small": float(result.get("map_small", 0.0)),
         }
 
-        # Per-class mAP
-        per_class = result.get("map_per_class", [])
-        if per_class is not None and len(per_class) == len(classes):
+        # Per-class mAP (torchmetrics returns a 0-d tensor when unavailable)
+        per_class = result.get("map_per_class", None)
+        if (per_class is not None
+                and isinstance(per_class, torch.Tensor)
+                and per_class.ndim > 0
+                and len(per_class) == len(classes)):
             for i, cls_name in enumerate(classes):
                 metrics[f"mAP50-95/{cls_name}"] = float(per_class[i])
 
