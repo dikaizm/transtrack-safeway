@@ -51,6 +51,14 @@ class YOLOPipeline(BasePipeline):
             "weights": self.model_cfg.get("weights", ""),
         }
 
+        # Disable YOLO's built-in MLflow callback — we do our own logging
+        # to keep everything in the single "transtrack-road-safety" experiment.
+        try:
+            from ultralytics import settings as yolo_settings
+            yolo_settings.update({"mlflow": False})
+        except Exception:
+            pass
+
         with mlflow.start_run(run_name=run_name, tags=tags) as run:
             log_config(self.config)
 
