@@ -5,3 +5,4 @@ models/
 yolov5/
 runs/
 yolov8m-seg.pt
+model-dev-pipeline/ssh/
