@@ -27,7 +27,7 @@ DATASETS = {
     "det": {
         "workspace": "stelar",
         "project":   "rdd-mining-road-det",
-        "version":   3,
+        "version":   4,
         "format":    "yolov8",
         "dest":      DATA / "detection",
     },
