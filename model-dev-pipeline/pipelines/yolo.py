@@ -358,7 +358,8 @@ class YOLOPipeline(BasePipeline):
             except AttributeError:
                 return
             val_metrics = {
-                f"val/{k}": float(v)
+                # MLflow forbids '(' and ')' — replace with nothing
+                f"val/{k}".replace("(", "").replace(")", ""): float(v)
                 for k, v in raw.items()
                 if isinstance(v, (int, float))
             }
