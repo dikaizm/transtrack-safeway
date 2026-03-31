@@ -19,6 +19,9 @@ import tempfile
 from pathlib import Path
 
 import cv2
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
 import torch
@@ -38,6 +41,9 @@ from utils.mlflow_helper import (
 )
 
 IGNORE_INDEX = 255   # unlabeled pixels — excluded from loss and mIoU
+
+# RGB overlay colors per class index (drive_area=green, off_road=red, fallback=blue)
+CLASS_COLORS = [(0, 200, 0), (200, 0, 0), (0, 0, 200)]
 
 
 # ------------------------------------------------------------------ #
@@ -276,6 +282,7 @@ class SegFormerPipeline(BasePipeline):
             best_miou     = 0.0
             patience_ctr  = 0
             final_metrics: dict = {}
+            history: dict[str, list] = {"loss": [], "mIoU": [], "pixel_acc": []}
 
             for epoch in range(epochs):
                 # ── Train ──────────────────────────────────────────────
@@ -304,7 +311,7 @@ class SegFormerPipeline(BasePipeline):
                 avg_loss = train_loss / len(train_loader)
 
                 # ── Validate ───────────────────────────────────────────
-                val_metrics = self._run_val(model, val_loader, device, nc, img_size)
+                val_metrics, _ = self._run_val(model, val_loader, device, nc, img_size)
                 current_miou = val_metrics.get("mIoU", 0.0)
 
                 epoch_metrics = {
@@ -312,6 +319,9 @@ class SegFormerPipeline(BasePipeline):
                     **{f"val/{k}": v for k, v in val_metrics.items()},
                 }
                 mlflow.log_metrics(epoch_metrics, step=epoch)
+                history["loss"].append(avg_loss)
+                history["mIoU"].append(current_miou)
+                history["pixel_acc"].append(val_metrics.get("pixel_acc", 0.0))
 
                 print(
                     f"[Epoch {epoch+1:>3}/{epochs}] "
@@ -338,6 +348,19 @@ class SegFormerPipeline(BasePipeline):
             mlflow.log_metrics({"best/mIoU": best_miou})
             mlflow.log_artifacts(str(output_dir / "best"), artifact_path="weights")
             mlflow.set_tag("best_weights", str(output_dir / "best"))
+
+            # Training curves
+            curve_path = output_dir / "training_curves.png"
+            self._plot_training_curves(history, curve_path)
+            mlflow.log_artifact(str(curve_path), artifact_path="training_results")
+
+            # Val sample visualizations from best model
+            best_model, _ = self.load_model(output_dir / "best")
+            best_model.to(device)
+            self._log_val_samples(
+                best_model, val_ds, device, nc, img_size,
+                classes, output_dir / "val_samples",
+            )
 
             # GDrive upload
             best_dir = output_dir / "best"
@@ -437,9 +460,13 @@ class SegFormerPipeline(BasePipeline):
                     num_workers=self.train_cfg.get("workers", 4),
                 )
 
-                metrics = self._run_val(model, loader, device, nc, img_size)
+                metrics, cm = self._run_val(model, loader, device, nc, img_size)
                 all_metrics[condition] = metrics
                 log_metrics_per_condition(metrics, condition)
+
+                cm_path = Path(tempfile.mkdtemp()) / f"confusion_matrix_{condition}.png"
+                self._plot_confusion_matrix(cm, classes, condition, cm_path)
+                mlflow.log_artifact(str(cm_path), artifact_path=f"confusion_matrix/{condition}")
 
                 print(f"  mIoU={metrics['mIoU']:.4f}  pixel_acc={metrics['pixel_acc']:.4f}")
 
@@ -462,7 +489,7 @@ class SegFormerPipeline(BasePipeline):
 
     def _run_val(
         self, model, loader, device, num_classes: int, img_size: int,
-    ) -> dict[str, float]:
+    ) -> tuple[dict[str, float], np.ndarray]:
         model.eval()
         all_preds   = []
         all_targets = []
@@ -472,7 +499,6 @@ class SegFormerPipeline(BasePipeline):
                 pixel_values = pixel_values.to(device)
 
                 outputs = model(pixel_values=pixel_values)
-                # Upsample logits from H/4 to img_size
                 logits  = F.interpolate(
                     outputs.logits, size=(img_size, img_size),
                     mode="bilinear", align_corners=False,
@@ -483,7 +509,117 @@ class SegFormerPipeline(BasePipeline):
 
         all_preds   = np.concatenate(all_preds,   axis=0)
         all_targets = np.concatenate(all_targets, axis=0)
-        return compute_seg_metrics(all_preds, all_targets, num_classes)
+
+        # Pixel-level confusion matrix (rows=GT, cols=pred), ignoring IGNORE_INDEX
+        valid   = all_targets != IGNORE_INDEX
+        gt_flat = all_targets[valid].astype(np.int64)
+        pd_flat = all_preds[valid].astype(np.int64)
+        cm = np.zeros((num_classes, num_classes), dtype=np.int64)
+        np.add.at(cm, (gt_flat, pd_flat), 1)
+
+        return compute_seg_metrics(all_preds, all_targets, num_classes), cm
+
+    def _plot_training_curves(self, history: dict, out_path: Path) -> None:
+        epochs = range(1, len(history["loss"]) + 1)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+        ax1.plot(epochs, history["loss"], color="tab:blue")
+        ax1.set_title("Training Loss")
+        ax1.set_xlabel("Epoch")
+        ax1.set_ylabel("Loss")
+        ax1.grid(True, alpha=0.3)
+
+        ax2.plot(epochs, history["mIoU"],     label="mIoU",      color="tab:green")
+        ax2.plot(epochs, history["pixel_acc"], label="Pixel Acc", color="tab:orange", linestyle="--")
+        ax2.set_title("Validation Metrics")
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("Score")
+        ax2.set_ylim(0, 1)
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        fig.tight_layout()
+        fig.savefig(str(out_path), dpi=150)
+        plt.close(fig)
+
+    def _log_val_samples(
+        self,
+        model,
+        val_ds: Dataset,
+        device,
+        num_classes: int,
+        img_size: int,
+        classes: list[str],
+        out_dir: Path,
+        n: int = 8,
+    ) -> None:
+        """Save side-by-side panels: original | GT mask | predicted mask."""
+        out_dir.mkdir(parents=True, exist_ok=True)
+        model.eval()
+        indices = np.linspace(0, len(val_ds) - 1, min(n, len(val_ds)), dtype=int)
+
+        with torch.no_grad():
+            for i, idx in enumerate(indices):
+                pixel_values, gt_mask = val_ds[idx]
+                outputs = model(pixel_values=pixel_values.unsqueeze(0).to(device))
+                logits  = F.interpolate(
+                    outputs.logits, size=(img_size, img_size),
+                    mode="bilinear", align_corners=False,
+                )
+                pred_mask = logits.argmax(dim=1).squeeze(0).cpu().numpy()
+                gt_np     = gt_mask.numpy()
+
+                # Reconstruct RGB image from normalized tensor
+                mean = np.array([0.485, 0.456, 0.406])
+                std  = np.array([0.229, 0.224, 0.225])
+                img  = pixel_values.permute(1, 2, 0).numpy()
+                img  = np.clip((img * std + mean) * 255, 0, 255).astype(np.uint8)
+
+                def _overlay(base, mask):
+                    out = base.copy()
+                    for cls_idx, color in enumerate(CLASS_COLORS[:num_classes]):
+                        out[mask == cls_idx] = (
+                            out[mask == cls_idx] * 0.5
+                            + np.array(color, dtype=np.float32) * 0.5
+                        ).astype(np.uint8)
+                    return out
+
+                gt_overlay   = _overlay(img, gt_np)
+                pred_overlay = _overlay(img, pred_mask)
+                panel = np.concatenate([img, gt_overlay, pred_overlay], axis=1)
+
+                out_path = out_dir / f"sample_{i:02d}.png"
+                cv2.imwrite(str(out_path), cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
+
+        mlflow.log_artifacts(str(out_dir), artifact_path="val_samples")
+
+    def _plot_confusion_matrix(
+        self,
+        cm: np.ndarray,
+        classes: list[str],
+        condition: str,
+        out_path: Path,
+    ) -> None:
+        cm_norm = cm.astype(float) / (cm.sum(axis=1, keepdims=True) + 1e-6)
+        fig, ax = plt.subplots(figsize=(5, 4))
+        im = ax.imshow(cm_norm, interpolation="nearest", cmap="Blues", vmin=0, vmax=1)
+        fig.colorbar(im, ax=ax)
+        ax.set_xticks(range(len(classes)))
+        ax.set_yticks(range(len(classes)))
+        ax.set_xticklabels(classes, rotation=45, ha="right")
+        ax.set_yticklabels(classes)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Ground Truth")
+        ax.set_title(f"Confusion Matrix — {condition}")
+        for r in range(len(classes)):
+            for c in range(len(classes)):
+                ax.text(c, r, f"{cm_norm[r, c]:.2f}",
+                        ha="center", va="center",
+                        color="white" if cm_norm[r, c] > 0.5 else "black",
+                        fontsize=9)
+        fig.tight_layout()
+        fig.savefig(str(out_path), dpi=150)
+        plt.close(fig)
 
     def _log_condition_summary(
         self, all_metrics: dict[str, dict], classes: list[str],
