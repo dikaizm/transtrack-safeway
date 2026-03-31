@@ -11,11 +11,18 @@ from ultralytics import YOLO
 
 from pipelines.base import BasePipeline
 from pipelines.registry import register_pipeline
+from utils.gdrive import (
+    build_service,
+    get_run_weights_folder,
+    get_run_visuals_folder,
+    upload_and_share,
+)
 from utils.mlflow_helper import (
     log_artifacts_from_dir,
     log_config,
     log_metrics_per_condition,
     setup_mlflow,
+    tag_gdrive_link,
 )
 from utils.preprocess import preprocess_frame
 
@@ -114,6 +121,19 @@ class YOLOPipeline(BasePipeline):
 
                 print(f"\nTraining complete. Run ID: {run.info.run_id}")
                 print(f"Best weights: {best_weights}")
+
+                # Upload best.pt to GDrive; log shareable link to MLflow tag
+                if best_weights.exists():
+                    try:
+                        gdrive_task = "seg" if task == "segment" else "det"
+                        gdrive_run  = run_name or run.info.run_id
+                        svc         = build_service()
+                        folder_id   = get_run_weights_folder(svc, gdrive_run, gdrive_task)
+                        link        = upload_and_share(svc, best_weights, folder_id)
+                        tag_gdrive_link(run.info.run_id, f"gdrive_{gdrive_task}_weights", link)
+                        print(f"GDrive weights: {link}")
+                    except Exception as e:
+                        print(f"GDrive weights upload failed (non-fatal): {e}")
 
             # Upload full training log to MLflow
             if log_file.exists():
@@ -454,12 +474,13 @@ class YOLOPipeline(BasePipeline):
         model: YOLO,
         condition: str,
         data_path: str,
-        n_samples: int = 10,
+        n_samples: int = 30,
+        fps: int = 3,
     ) -> None:
         """
         Run model.predict() on up to n_samples images from data_path/images/,
-        save annotated results (masks for seg, boxes for det), and log to MLflow
-        under visuals/{condition}/.
+        stitch annotated frames into an MP4, and log to MLflow under
+        visuals/{condition}/.
 
         YOLO's result.plot() renders:
           - Segmentation: colored mask overlay + class label per instance
@@ -475,15 +496,14 @@ class YOLOPipeline(BasePipeline):
         if not image_paths:
             return
 
-        # Evenly sample across the set so we see variety, not just the first N
+        # Evenly sample so the video spans the full set, not just the first N
         step = max(1, len(image_paths) // n_samples)
         samples = image_paths[::step][:n_samples]
 
-        print(f"  Generating {len(samples)} visual samples for condition: {condition}")
+        print(f"  Generating visual video for condition '{condition}': {len(samples)} frames @ {fps}fps")
 
-        task = self.model_cfg.get("task", "detect")
-        classes = self.data_cfg.get("classes", [])
-        imgsz = self.train_cfg.get("imgsz", 640)
+        task   = self.model_cfg.get("task", "detect")
+        imgsz  = self.train_cfg.get("imgsz", 640)
         device = self.train_cfg.get("device", 0)
 
         tmp_dir = Path(tempfile.mkdtemp(prefix=f"visuals_{condition}_"))
@@ -496,7 +516,8 @@ class YOLOPipeline(BasePipeline):
                 conf=0.25,
             )
 
-            for i, (result, img_path) in enumerate(zip(results, samples)):
+            frames = []
+            for result in results:
                 annotated = result.plot(
                     labels=True,
                     conf=True,
@@ -505,14 +526,45 @@ class YOLOPipeline(BasePipeline):
                     line_width=2,
                     font_size=12,
                 )
-                out_name = f"{condition}_{i+1:02d}_{img_path.stem}.jpg"
-                out_path = tmp_dir / out_name
-                cv2.imwrite(str(out_path), annotated)
+                # Burn condition label into top-left corner
+                label = f"{task.upper()} | {condition}"
+                cv2.rectangle(annotated, (0, 0), (len(label) * 11 + 10, 30), (0, 0, 0), -1)
+                cv2.putText(annotated, label, (6, 20), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6, (255, 255, 255), 1, cv2.LINE_AA)
+                frames.append(annotated)
 
-            mlflow.log_artifacts(str(tmp_dir), artifact_path=f"visuals/{condition}")
-            print(f"  Visual samples logged to MLflow: visuals/{condition}/")
+            if frames:
+                h, w = frames[0].shape[:2]
+                out_path = tmp_dir / f"{task}_{condition}.mp4"
+                for fourcc_str in ("avc1", "mp4v"):
+                    fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+                    writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
+                    if writer.isOpened():
+                        break
+                for frame in frames:
+                    writer.write(frame)
+                writer.release()
+
+                mlflow.log_artifact(str(out_path), artifact_path=f"visuals/{condition}")
+                duration = len(frames) / fps
+                print(f"  Video logged to MLflow: visuals/{condition}/{out_path.name} (~{duration:.1f}s)")
+
+                # Upload video to GDrive visuals folder; tag link on active run
+                try:
+                    active = mlflow.active_run()
+                    if active:
+                        svc       = build_service()
+                        run_label = active.info.run_name or active.info.run_id
+                        folder_id = get_run_visuals_folder(svc, run_label)
+                        link      = upload_and_share(svc, out_path, folder_id)
+                        tag_key   = f"gdrive_vis_{task}_{condition}"
+                        tag_gdrive_link(active.info.run_id, tag_key, link)
+                        print(f"  GDrive video: {link}")
+                except Exception as e:
+                    print(f"  GDrive video upload failed (non-fatal): {e}")
+
         except Exception as e:
-            print(f"  Could not generate visuals for {condition}: {e}")
+            print(f"  Could not generate visual video for {condition}: {e}")
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 

@@ -92,12 +92,12 @@ python evaluate.py \
     --run-name "eval-seg-${RUN_NAME}" \
     2>&1 | tee "logs/eval_seg_${RUN_NAME}.log"
 
-# Visual samples are already generated inside evaluate.py (10 per condition).
-# Run standalone visualize for a larger client-facing set (20 per condition).
+# Standalone visualize — larger client-facing video set (60 frames ≈ 20s @ 3fps)
 python visualize.py \
     --config config/yolo_segmentation.yaml \
     --model "$SEG_WEIGHTS" \
-    --n-samples 20 \
+    --n-samples 60 \
+    --fps 3 \
     --run-name "vis-seg-${RUN_NAME}" \
     2>&1 | tee "logs/vis_seg_${RUN_NAME}.log"
 
@@ -131,7 +131,8 @@ python evaluate.py \
 python visualize.py \
     --config config/yolo_detection.yaml \
     --model "$DET_WEIGHTS" \
-    --n-samples 20 \
+    --n-samples 60 \
+    --fps 3 \
     --run-name "vis-det-${RUN_NAME}" \
     2>&1 | tee "logs/vis_det_${RUN_NAME}.log"
 

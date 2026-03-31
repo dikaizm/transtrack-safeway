@@ -1,5 +1,6 @@
 import os
 import mlflow
+from mlflow.tracking import MlflowClient
 from pathlib import Path
 
 
@@ -46,6 +47,20 @@ def log_artifacts_from_dir(directory: str | Path, artifact_path: str = "") -> No
     directory = Path(directory)
     if directory.exists():
         mlflow.log_artifacts(str(directory), artifact_path=artifact_path)
+
+
+def tag_gdrive_link(run_id: str, tag_key: str, link: str) -> None:
+    """
+    Set a GDrive shareable link as a tag on an existing MLflow run.
+    Uses MlflowClient so it works both inside and outside an active run context.
+
+    Args:
+        run_id:  MLflow run ID (from mlflow.active_run().info.run_id)
+        tag_key: e.g. "gdrive_seg_weights", "gdrive_vis_det_night"
+        link:    https://drive.google.com/file/d/{id}/view
+    """
+    client = MlflowClient()
+    client.set_tag(run_id, tag_key, link)
 
 
 def _flatten(d: dict, prefix: str = "", sep: str = ".") -> dict:
