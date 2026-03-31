@@ -1,10 +1,25 @@
 defaults:
   - base
 
+# Roboflow: stelar/rdd-mining-road-seg v1
+# Download: python scripts/download_datasets.py --api-key <key> --dataset seg
+data:
+  train: "data/segmentation/train"
+  val:   "data/segmentation/val"
+  test:
+    all:   "data/segmentation/test"
+    day:   "data/segmentation/test/day"
+    wet:   "data/segmentation/test/wet"
+    night: "data/segmentation/test/night"
+  classes:
+    - drive_area
+    - off_road
+  nc: 2
+
 model:
   type: "yolo"
   task: "segment"
-  weights: "yolov8n-seg.pt"   # nano — binary task, doesn't need large model
+  weights: "yolov8n-seg.pt"   # nano — 2-class task, doesn't need large model
 
 train:
   epochs: 100

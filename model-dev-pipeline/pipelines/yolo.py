@@ -1,5 +1,7 @@
 import shutil
+import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import cv2
@@ -35,70 +37,91 @@ class YOLOPipeline(BasePipeline):
             self.mlflow_cfg["experiment_name"],
         )
 
+        task = self.model_cfg.get("task", "detect")
         tags = {
             "model_type": "yolo",
-            "task": self.model_cfg.get("task", "detect"),
+            "task": task,
             "weights": self.model_cfg.get("weights", ""),
         }
 
         with mlflow.start_run(run_name=run_name, tags=tags) as run:
             log_config(self.config)
 
-            # Apply condition-aware preprocessing to train/val images
-            # Night → CLAHE clip=4.0, Dusty → CLAHE clip=2.0, Day → no-op
-            print("Preprocessing training images...")
-            self._preprocess_dataset_images(self.data_cfg["train"])
-            self._preprocess_dataset_images(self.data_cfg["val"])
+            log_file = Path(tempfile.mktemp(suffix=".log", prefix=f"train_{task}_"))
 
-            dataset_yaml = self._write_dataset_yaml()
-            model = YOLO(self.model_cfg["weights"])
+            with self._tee_log(log_file):
+                print(f"Run ID   : {run.info.run_id}")
+                print(f"Task     : {task}")
+                print(f"Weights  : {self.model_cfg.get('weights')}")
+                print(f"Epochs   : {self.train_cfg.get('epochs', 100)}")
+                print(f"Batch    : {self.train_cfg.get('batch', 16)}")
+                print(f"Imgsz    : {self.train_cfg.get('imgsz', 640)}")
+                print(f"Classes  : {self.data_cfg.get('classes', [])}")
 
-            # Register MLflow callbacks for per-epoch metric logging
-            self._register_callbacks(model)
+                # Apply condition-aware preprocessing to train/val images
+                # Night → CLAHE clip=4.0, Dusty → CLAHE clip=2.0, Day → no-op
+                print("\nPreprocessing training images...")
+                self._preprocess_dataset_images(self.data_cfg["train"])
+                self._preprocess_dataset_images(self.data_cfg["val"])
 
-            results = model.train(
-                data=dataset_yaml,
-                epochs=self.train_cfg.get("epochs", 100),
-                batch=self.train_cfg.get("batch", 16),
-                imgsz=self.train_cfg.get("imgsz", 640),
-                lr0=self.train_cfg.get("lr0", 0.01),
-                lrf=self.train_cfg.get("lrf", 0.01),
-                momentum=self.train_cfg.get("momentum", 0.937),
-                weight_decay=self.train_cfg.get("weight_decay", 0.0005),
-                warmup_epochs=self.train_cfg.get("warmup_epochs", 3),
-                patience=self.train_cfg.get("patience", 20),
-                save_period=self.train_cfg.get("save_period", 10),
-                workers=self.train_cfg.get("workers", 8),
-                device=self.train_cfg.get("device", 0),
-                # Augmentation
-                hsv_h=self.aug_cfg.get("hsv_h", 0.015),
-                hsv_s=self.aug_cfg.get("hsv_s", 0.7),
-                hsv_v=self.aug_cfg.get("hsv_v", 0.4),
-                degrees=self.aug_cfg.get("degrees", 0.0),
-                translate=self.aug_cfg.get("translate", 0.1),
-                scale=self.aug_cfg.get("scale", 0.5),
-                fliplr=self.aug_cfg.get("fliplr", 0.5),
-                mosaic=self.aug_cfg.get("mosaic", 1.0),
-                blur=self.aug_cfg.get("blur", 0.01),
-                project="runs/train",
-                exist_ok=True,
-            )
+                dataset_yaml = self._write_dataset_yaml()
+                model = YOLO(self.model_cfg["weights"])
 
-            save_dir = Path(results.save_dir)
-            final_metrics = self._extract_final_metrics(results)
+                # Register MLflow callbacks for per-epoch metric logging
+                self._register_callbacks(model)
 
-            mlflow.log_metrics(final_metrics)
-            log_artifacts_from_dir(save_dir, artifact_path="training_results")
+                results = model.train(
+                    data=dataset_yaml,
+                    epochs=self.train_cfg.get("epochs", 100),
+                    batch=self.train_cfg.get("batch", 16),
+                    imgsz=self.train_cfg.get("imgsz", 640),
+                    lr0=self.train_cfg.get("lr0", 0.01),
+                    lrf=self.train_cfg.get("lrf", 0.01),
+                    momentum=self.train_cfg.get("momentum", 0.937),
+                    weight_decay=self.train_cfg.get("weight_decay", 0.0005),
+                    warmup_epochs=self.train_cfg.get("warmup_epochs", 3),
+                    patience=self.train_cfg.get("patience", 20),
+                    save_period=self.train_cfg.get("save_period", 10),
+                    workers=self.train_cfg.get("workers", 8),
+                    device=self.train_cfg.get("device", 0),
+                    verbose=True,
+                    # Augmentation
+                    hsv_h=self.aug_cfg.get("hsv_h", 0.015),
+                    hsv_s=self.aug_cfg.get("hsv_s", 0.7),
+                    hsv_v=self.aug_cfg.get("hsv_v", 0.4),
+                    degrees=self.aug_cfg.get("degrees", 0.0),
+                    translate=self.aug_cfg.get("translate", 0.1),
+                    scale=self.aug_cfg.get("scale", 0.5),
+                    fliplr=self.aug_cfg.get("fliplr", 0.5),
+                    mosaic=self.aug_cfg.get("mosaic", 1.0),
+                    blur=self.aug_cfg.get("blur", 0.01),
+                    project="runs/train",
+                    exist_ok=True,
+                )
 
-            best_weights = save_dir / "weights" / "best.pt"
-            if best_weights.exists():
-                mlflow.log_artifact(str(best_weights), artifact_path="weights")
+                save_dir = Path(results.save_dir)
+                final_metrics = self._extract_final_metrics(results)
 
-            mlflow.set_tag("best_weights", str(best_weights))
-            mlflow.set_tag("run_id", run.info.run_id)
+                mlflow.log_metrics(final_metrics)
+                log_artifacts_from_dir(save_dir, artifact_path="training_results")
 
-            print(f"\nTraining complete. Run ID: {run.info.run_id}")
-            print(f"Best weights: {best_weights}")
+                best_weights = save_dir / "weights" / "best.pt"
+                if best_weights.exists():
+                    mlflow.log_artifact(str(best_weights), artifact_path="weights")
+
+                mlflow.set_tag("best_weights", str(best_weights))
+                mlflow.set_tag("run_id", run.info.run_id)
+
+                print(f"\nTraining complete. Run ID: {run.info.run_id}")
+                print(f"Best weights: {best_weights}")
+
+            # Upload full training log to MLflow
+            if log_file.exists():
+                mlflow.log_artifact(str(log_file), artifact_path="logs")
+                log_file.unlink(missing_ok=True)
+
+            # Include weights path so callers (train.py, shell scripts) can chain into eval
+            final_metrics["_best_weights"] = str(best_weights)
             return final_metrics
 
     # ------------------------------------------------------------------ #
@@ -178,6 +201,9 @@ class YOLOPipeline(BasePipeline):
                 if hasattr(metrics, "confusion_matrix"):
                     self._log_confusion_matrix(metrics, condition)
 
+                # Visual samples — annotated images logged to MLflow
+                self._log_visual_samples(model, condition, data_path)
+
             # Log and print per-condition comparison summary
             if len(all_metrics) > 1:
                 self._log_condition_summary(all_metrics, classes)
@@ -248,24 +274,71 @@ class YOLOPipeline(BasePipeline):
         tmp.close()
         return tmp.name
 
+    @contextmanager
+    def _tee_log(self, log_path: Path):
+        """Duplicate stdout to a log file while preserving console output."""
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = log_path.open("w", buffering=1)
+
+        class _Tee:
+            def __init__(self, *streams):
+                self._streams = streams
+
+            def write(self, data):
+                for s in self._streams:
+                    s.write(data)
+
+            def flush(self):
+                for s in self._streams:
+                    s.flush()
+
+            def isatty(self):
+                return False
+
+        orig_stdout = sys.stdout
+        sys.stdout = _Tee(orig_stdout, log_fh)
+        try:
+            yield
+        finally:
+            sys.stdout = orig_stdout
+            log_fh.close()
+
     def _register_callbacks(self, model: YOLO) -> None:
         """Register MLflow logging callbacks on the YOLO trainer."""
 
         def on_train_epoch_end(trainer):
-            metrics = {
-                k: float(v)
-                for k, v in trainer.metrics.items()
+            epoch = trainer.epoch
+            # Loss values (box_loss, cls_loss, dfl_loss / seg_loss)
+            loss_metrics = {
+                f"train/{k}": float(v)
+                for k, v in trainer.label_loss_items(trainer.tloss, prefix="train").items()
                 if isinstance(v, (int, float))
             }
-            mlflow.log_metrics(metrics, step=trainer.epoch)
+            # Learning rate
+            lr_metrics = {
+                f"lr/pg{i}": float(v)
+                for i, v in enumerate(
+                    [pg["lr"] for pg in trainer.optimizer.param_groups]
+                )
+            }
+            mlflow.log_metrics({**loss_metrics, **lr_metrics}, step=epoch)
+
+            # Verbose epoch summary to stdout (captured by _tee_log → MLflow)
+            loss_str = "  ".join(f"{k}={v:.4f}" for k, v in loss_metrics.items())
+            lr_str = "  ".join(f"{k}={v:.6f}" for k, v in lr_metrics.items())
+            print(f"[Epoch {epoch+1}] {loss_str}  |  {lr_str}")
 
         def on_val_end(trainer):
-            metrics = {
+            val_metrics = {
                 f"val/{k}": float(v)
                 for k, v in trainer.metrics.items()
                 if isinstance(v, (int, float))
             }
-            mlflow.log_metrics(metrics, step=trainer.epoch)
+            mlflow.log_metrics(val_metrics, step=trainer.epoch)
+
+            # Print val summary
+            metrics_str = "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items())
+            print(f"[Val   {trainer.epoch+1}] {metrics_str}")
 
         model.add_callback("on_train_epoch_end", on_train_epoch_end)
         model.add_callback("on_val_end", on_val_end)
@@ -375,6 +448,73 @@ class YOLOPipeline(BasePipeline):
         # Also log per-condition aggregate as flat metrics for MLflow chart view
         for cond in conditions:
             mlflow.log_metric(f"summary/mAP50_{cond}", all_metrics[cond].get("mAP50", 0.0))
+
+    def _log_visual_samples(
+        self,
+        model: YOLO,
+        condition: str,
+        data_path: str,
+        n_samples: int = 10,
+    ) -> None:
+        """
+        Run model.predict() on up to n_samples images from data_path/images/,
+        save annotated results (masks for seg, boxes for det), and log to MLflow
+        under visuals/{condition}/.
+
+        YOLO's result.plot() renders:
+          - Segmentation: colored mask overlay + class label per instance
+          - Detection: bounding boxes + class label + confidence score
+        """
+        images_dir = Path(data_path) / "images"
+        if not images_dir.exists():
+            return
+
+        image_paths = sorted(
+            list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png"))
+        )
+        if not image_paths:
+            return
+
+        # Evenly sample across the set so we see variety, not just the first N
+        step = max(1, len(image_paths) // n_samples)
+        samples = image_paths[::step][:n_samples]
+
+        print(f"  Generating {len(samples)} visual samples for condition: {condition}")
+
+        task = self.model_cfg.get("task", "detect")
+        classes = self.data_cfg.get("classes", [])
+        imgsz = self.train_cfg.get("imgsz", 640)
+        device = self.train_cfg.get("device", 0)
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix=f"visuals_{condition}_"))
+        try:
+            results = model.predict(
+                source=[str(p) for p in samples],
+                imgsz=imgsz,
+                device=device,
+                verbose=False,
+                conf=0.25,
+            )
+
+            for i, (result, img_path) in enumerate(zip(results, samples)):
+                annotated = result.plot(
+                    labels=True,
+                    conf=True,
+                    masks=(task == "segment"),
+                    boxes=True,
+                    line_width=2,
+                    font_size=12,
+                )
+                out_name = f"{condition}_{i+1:02d}_{img_path.stem}.jpg"
+                out_path = tmp_dir / out_name
+                cv2.imwrite(str(out_path), annotated)
+
+            mlflow.log_artifacts(str(tmp_dir), artifact_path=f"visuals/{condition}")
+            print(f"  Visual samples logged to MLflow: visuals/{condition}/")
+        except Exception as e:
+            print(f"  Could not generate visuals for {condition}: {e}")
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def _log_confusion_matrix(self, metrics, condition: str) -> None:
         try:

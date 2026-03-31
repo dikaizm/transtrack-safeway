@@ -81,7 +81,13 @@ def main():
 
     print("\nFinal metrics:")
     for k, v in metrics.items():
-        print(f"  {k}: {v:.4f}")
+        if not k.startswith("_"):
+            print(f"  {k}: {v:.4f}")
+
+    # Machine-readable marker — lets shell scripts capture the weights path
+    best = metrics.get("_best_weights")
+    if best:
+        print(f"\nBEST_WEIGHTS={best}")
 
 
 if __name__ == "__main__":
