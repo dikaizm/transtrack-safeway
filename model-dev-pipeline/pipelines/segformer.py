@@ -379,10 +379,16 @@ class SegFormerPipeline(BasePipeline):
         nc         = len(classes)
         img_size   = self.train_cfg.get("imgsz", 640)
 
+        def _has_images(path: str) -> bool:
+            p = Path(path) / "images" if path else None
+            if p is None or not p.exists():
+                return False
+            return any(p.glob("*.*"))
+
         if conditions is None:
             conditions = [
                 k for k in ["day", "wet", "night"]
-                if Path(test_cfg.get(k, "")).exists()
+                if _has_images(test_cfg.get(k, ""))
             ]
         if not conditions:
             conditions = ["all"]
@@ -406,9 +412,17 @@ class SegFormerPipeline(BasePipeline):
 
             for condition in conditions:
                 data_path = test_cfg.get(condition)
-                if not data_path or not Path(data_path).exists():
-                    print(f"Skipping '{condition}' — path not found: {data_path}")
-                    continue
+                if not data_path or not _has_images(data_path):
+                    fallback = test_cfg.get("all")
+                    if fallback and _has_images(fallback):
+                        print(
+                            f"Warning: condition '{condition}' dir is empty — "
+                            f"falling back to default test set: {fallback}"
+                        )
+                        data_path = fallback
+                    else:
+                        print(f"Skipping '{condition}' — no images found and no fallback available.")
+                        continue
 
                 print(f"\nEvaluating on condition: {condition}")
                 ds = YOLOSegDataset(
