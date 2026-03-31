@@ -140,6 +140,69 @@ def upload_and_share(service, local_path: str | Path, folder_id: str) -> str:
     return link
 
 
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".ts", ".webm"}
+
+
+def list_files(service, folder_id: str, extensions: set[str] | None = None) -> list[dict]:
+    """
+    List files in a Drive folder. Returns list of {id, name} dicts.
+    Optionally filter by file extensions (e.g. {'.mp4', '.avi'}).
+    """
+    query = f"'{folder_id}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'"
+    results = service.files().list(q=query, fields="files(id, name)").execute()
+    files = results.get("files", [])
+    if extensions:
+        files = [f for f in files if Path(f["name"]).suffix.lower() in extensions]
+    return files
+
+
+def download_file(service, file_id: str, dest_path: str | Path) -> Path:
+    """Download a Drive file to dest_path. Returns the local path."""
+    from googleapiclient.http import MediaIoBaseDownload
+    import io
+
+    dest_path = Path(dest_path)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    request = service.files().get_media(fileId=file_id)
+    with open(dest_path, "wb") as fh:
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            if status:
+                print(f"    {int(status.progress() * 100)}%", end="\r")
+    print(f"  GDrive: downloaded → {dest_path.name}")
+    return dest_path
+
+
+def download_folder(service, folder_id: str, dest_dir: str | Path,
+                    extensions: set[str] | None = None) -> list[Path]:
+    """
+    Download all files from a Drive folder to dest_dir.
+    Skips files that already exist locally.
+    Returns list of local file paths.
+    """
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    files = list_files(service, folder_id, extensions)
+    if not files:
+        print(f"  GDrive: no files found in folder {folder_id}")
+        return []
+
+    print(f"  GDrive: {len(files)} file(s) to download from folder {folder_id}")
+    local_paths = []
+    for f in files:
+        local_path = dest_dir / f["name"]
+        if local_path.exists():
+            print(f"  GDrive: already exists — {f['name']}, skipping")
+            local_paths.append(local_path)
+        else:
+            local_paths.append(download_file(service, f["id"], local_path))
+    return local_paths
+
+
 def get_run_weights_folder(service, run_name: str, task: str) -> str:
     """
     Get/create the Drive folder for model weights:

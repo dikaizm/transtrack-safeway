@@ -35,7 +35,9 @@ import yaml
 
 import pipelines  # noqa: F401
 from utils.gdrive import (
+    VIDEO_EXTENSIONS,
     build_service,
+    download_folder,
     get_run_visuals_folder,
     upload_and_share,
 )
@@ -206,6 +208,7 @@ def run_visualization(
     n_samples: int,
     source_video: str | None,
     source_dir: str | None,
+    gdrive_folder: str | None,
     run_name: str,
     out_dir: Path,
     fps: int,
@@ -262,6 +265,19 @@ def run_visualization(
                 except Exception as e:
                     print(f"  GDrive upload failed (non-fatal): {e}")
 
+        # If a GDrive folder is specified, download its videos first
+        if gdrive_folder and not source_video and not source_dir:
+            if gdrive_ok:
+                print(f"\nDownloading test videos from GDrive folder: {gdrive_folder}")
+                dl_dir = out_dir / "_downloaded"
+                downloaded = download_folder(svc, gdrive_folder, dl_dir, VIDEO_EXTENSIONS)
+                if downloaded:
+                    source_dir = str(dl_dir)
+                else:
+                    print("  No videos downloaded — skipping inference.")
+            else:
+                print("GDrive unavailable — cannot download source videos. Provide --source-dir instead.")
+
         if source_video or source_dir:
             # Real-world inference on raw videos — no annotations required
             video_files: list[Path] = []
@@ -271,7 +287,7 @@ def run_visualization(
                 src = Path(source_dir)
                 video_files = sorted(
                     f for f in src.iterdir()
-                    if f.suffix.lower() in {".mp4", ".avi", ".mov", ".mkv", ".ts", ".webm"}
+                    if f.suffix.lower() in VIDEO_EXTENSIONS
                 )
                 if not video_files:
                     print(f"No video files found in {src}")
@@ -339,6 +355,8 @@ def main():
                         help="Single raw MP4 — run inference on every frame (no annotations needed)")
     parser.add_argument("--source-dir", default=None,
                         help="Directory of raw MP4/AVI/MOV videos — batch real-world inference (no annotations needed)")
+    parser.add_argument("--gdrive-folder", default=None,
+                        help="Google Drive folder ID containing raw test videos — auto-downloads and runs inference")
     parser.add_argument("--n-samples", type=int, default=60,
                         help="Max frames to sample from test images per condition (default: 60)")
     parser.add_argument("--fps",      type=int, default=DEFAULT_FPS,
@@ -372,6 +390,8 @@ def main():
         print(f"Source video : {args.source_video}")
     elif args.source_dir:
         print(f"Source dir   : {args.source_dir}")
+    elif args.gdrive_folder:
+        print(f"GDrive folder: {args.gdrive_folder}")
     else:
         print(f"Conditions   : {conditions}")
         print(f"Frames/cond  : {args.n_samples}")
@@ -387,6 +407,7 @@ def main():
         n_samples=args.n_samples,
         source_video=args.source_video,
         source_dir=args.source_dir,
+        gdrive_folder=args.gdrive_folder,
         run_name=run_name,
         out_dir=out_dir,
         fps=args.fps,
