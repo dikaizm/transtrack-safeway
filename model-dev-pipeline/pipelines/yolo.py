@@ -118,12 +118,16 @@ class YOLOPipeline(BasePipeline):
                 final_metrics = self._extract_final_metrics(results)
 
                 mlflow.log_metrics(final_metrics)
-                log_artifacts_from_dir(save_dir, artifact_path="training_results")
+                # Log training artifacts (plots, curves) — skip weights folder;
+                # model weights are distributed via GDrive, not stored in MLflow.
+                for item in save_dir.iterdir():
+                    if item.name != "weights":
+                        if item.is_file():
+                            mlflow.log_artifact(str(item), artifact_path="training_results")
+                        elif item.is_dir():
+                            log_artifacts_from_dir(item, artifact_path=f"training_results/{item.name}")
 
                 best_weights = save_dir / "weights" / "best.pt"
-                if best_weights.exists():
-                    mlflow.log_artifact(str(best_weights), artifact_path="weights")
-
                 mlflow.set_tag("best_weights", str(best_weights))
                 mlflow.set_tag("run_id", run.info.run_id)
 

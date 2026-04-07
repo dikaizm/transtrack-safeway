@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     model_detection_weights: str = "models/detection/best.pt"
 
     # Inference
-    frame_sample_fps: int = 3
+    frame_sample_fps: int = 12
     device: str = "cpu"
     detection_confidence: float = 0.25
     segmentation_confidence: float = 0.5
