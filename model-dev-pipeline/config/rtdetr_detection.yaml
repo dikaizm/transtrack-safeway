@@ -22,7 +22,7 @@ model:
 
 train:
   epochs: 100
-  batch: 8
+  batch: 16
   imgsz: 640
   lr0: 0.0001             # AdamW initial lr (RT-DETR default)
   lrf: 0.01               # final lr = lr0 * lrf
