@@ -109,8 +109,9 @@ class YOLOPipeline(BasePipeline):
                     scale=self.aug_cfg.get("scale", 0.5),
                     fliplr=self.aug_cfg.get("fliplr", 0.5),
                     mosaic=self.aug_cfg.get("mosaic", 1.0),
-                    project="runs/train",
-                    exist_ok=True,
+                    project=f"runs/{task}",
+                    name=run_name or "train",
+                    exist_ok=False,
                 )
 
                 save_dir = Path(results.save_dir)
