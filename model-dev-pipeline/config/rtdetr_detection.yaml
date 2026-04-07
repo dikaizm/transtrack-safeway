@@ -1,6 +1,8 @@
 defaults:
   - base
 
+# Roboflow: stelar/rdd-mining-road-det v5
+# Download: python scripts/download_datasets.py --api-key <key> --dataset det
 data:
   train: "data/detection/train"
   val:   "data/detection/val"
@@ -13,37 +15,30 @@ data:
 model:
   type: "rtdetr"
   task: "detect"
-  # Apache 2.0 licensed — HuggingFace Hub checkpoint
-  checkpoint: "PekingU/rtdetr_r50vd"   # RT-DETR ResNet-50 backbone
+  weights: "rtdetr-l.pt"   # Ultralytics RT-DETR large (COCO-pretrained)
   # Options:
-  #   PekingU/rtdetr_r18vd  — lightest (~20M params)
-  #   PekingU/rtdetr_r50vd  — balanced (~42M params)
-  #   PekingU/rtdetr_r101vd — heaviest, highest accuracy
+  #   rtdetr-l.pt — large (~32M params, good balance)
+  #   rtdetr-x.pt — extra large (~67M params, highest accuracy)
 
 train:
   epochs: 100
-  batch: 8          # transformer models need more memory per sample
+  batch: 8
   imgsz: 640
-  lr: 0.0001        # class heads (randomly reinit) — highest lr
-  lr_transformer: 0.00005  # pretrained encoder+decoder — medium lr
-  lr_backbone: 0.00001     # pretrained backbone — lowest lr
+  lr0: 0.0001             # AdamW initial lr (RT-DETR default)
+  lrf: 0.01               # final lr = lr0 * lrf
   weight_decay: 0.0001
-  warmup_steps: 500
+  warmup_epochs: 3
   patience: 20
-  gradient_clip: 0.1
+  save_period: 10
   workers: 4
-  device: "cuda"    # "cpu" for CPU
+  device: 0               # GPU device id, "cpu" for CPU
   output_dir: "runs/rtdetr"
 
 augmentation:
-  # Applied via albumentations in the dataset class
-  horizontal_flip: 0.5
-  color_jitter:
-    brightness: 0.4
-    contrast: 0.4
-    saturation: 0.4
-    hue: 0.1
-  random_scale:
-    min: 0.5
-    max: 1.5
-  blur_limit: 3
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
+  translate: 0.1
+  scale: 0.5
+  fliplr: 0.5
+  mosaic: 0.0             # RT-DETR: mosaic off by default

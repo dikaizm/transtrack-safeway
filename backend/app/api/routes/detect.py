@@ -2,7 +2,8 @@ import os
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -24,6 +25,7 @@ router = APIRouter(prefix="/detect", tags=["detection"])
 @router.post("", response_model=TaskCreatedResponse, status_code=202)
 async def submit_detection(
     video: UploadFile = File(...),
+    render_video: bool = Form(False),
     db: Session = Depends(get_db),
 ):
     # Basic file type check before saving
@@ -58,12 +60,13 @@ async def submit_detection(
         status="pending",
         video_filename=video.filename,
         frames_to_process=frames_to_process,
+        render_video=render_video,
     )
     db.add(task)
     db.commit()
 
     # Enqueue Celery task
-    run_detection_pipeline.delay(task_id, video_path)
+    run_detection_pipeline.delay(task_id, video_path, render=render_video)
 
     return TaskCreatedResponse(task_id=task_id, frames_to_process=frames_to_process)
 
@@ -99,6 +102,7 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
         status=task.status,
         conditions=task.conditions,
         frames_analyzed=task.frames_analyzed,
+        processing_time_sec=task.processing_time_sec,
         detections=[
             DetectionItem(
                 frame_index=d.frame_index,
@@ -110,4 +114,29 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
             )
             for d in detections
         ],
+    )
+
+
+@router.get("/{task_id}/video")
+def get_task_video(task_id: str, db: Session = Depends(get_db)):
+    task = db.query(DetectionTask).filter_by(id=task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    if task.status != "done":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Task is not done yet. Current status: {task.status}",
+        )
+    if not task.render_video:
+        raise HTTPException(
+            status_code=404,
+            detail="This task was submitted without render_video=true. Resubmit with render_video=true.",
+        )
+    if not task.rendered_video_path or not os.path.exists(task.rendered_video_path):
+        raise HTTPException(status_code=404, detail="Rendered video file not found.")
+
+    return FileResponse(
+        task.rendered_video_path,
+        media_type="video/mp4",
+        filename=f"detection_{task_id}.mp4",
     )

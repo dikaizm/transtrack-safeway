@@ -14,6 +14,7 @@ Flow:
 import os
 import shutil
 import tempfile
+import time
 from collections import Counter
 
 import cv2
@@ -27,18 +28,22 @@ from app.pipeline.detector import detect_hazards
 from app.pipeline.extractor import extract_frames
 from app.pipeline.postprocessor import temporal_smooth
 from app.pipeline.preprocessor import preprocess
+from app.pipeline.renderer import render_video
 from app.pipeline.segmentation import get_road_mask
 
 CLASS_NAMES = ["road_depression", "mud_patch", "soil_mound", "traffic_sign"]
 
 
 @celery_app.task(bind=True, name="detect.run_pipeline")
-def run_detection_pipeline(self, task_id: str, video_path: str) -> None:
+def run_detection_pipeline(
+    self, task_id: str, video_path: str, render: bool = False
+) -> None:
     db: Session = SessionLocal()
     frame_dir = tempfile.mkdtemp(prefix=f"frames_{task_id}_")
 
     try:
         _update_status(db, task_id, "processing")
+        t_start = time.monotonic()
 
         # 1. Extract frames at 3fps (time-based)
         frame_paths = extract_frames(
@@ -77,8 +82,21 @@ def run_detection_pipeline(self, task_id: str, video_path: str) -> None:
             condition_counts.most_common(1)[0][0] if condition_counts else "day"
         )
 
-        # 7. Persist and clean up
-        _save_results(db, task_id, confirmed, dominant_condition, len(frame_paths))
+        # 7. Optionally render annotated MP4
+        rendered_path = None
+        if render:
+            out_path = os.path.join(settings.rendered_video_dir, f"{task_id}.mp4")
+            render_video(
+                frame_paths,
+                confirmed,
+                out_path,
+                source_fps=float(settings.frame_sample_fps),
+            )
+            rendered_path = out_path
+
+        # 8. Persist and clean up
+        processing_time = round(time.monotonic() - t_start, 2)
+        _save_results(db, task_id, confirmed, dominant_condition, len(frame_paths), rendered_path, processing_time)
 
     except Exception as exc:
         _update_status(db, task_id, "failed", error=str(exc))
@@ -123,6 +141,8 @@ def _save_results(
     confirmed: list[dict],
     condition: str,
     frames_analyzed: int,
+    rendered_path: str | None = None,
+    processing_time_sec: float | None = None,
 ) -> None:
     task = db.query(DetectionTask).filter_by(id=task_id).first()
     if not task:
@@ -131,6 +151,10 @@ def _save_results(
     task.status = "done"
     task.conditions = condition
     task.frames_analyzed = frames_analyzed
+    if rendered_path:
+        task.rendered_video_path = rendered_path
+    if processing_time_sec is not None:
+        task.processing_time_sec = processing_time_sec
 
     for det in confirmed:
         bbox = det["bbox"]

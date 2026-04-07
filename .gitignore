@@ -9,3 +9,4 @@ model-dev-pipeline/ssh/
 .DS_Store
 .env
 model-dev-pipeline/.env
+model-dev-pipeline/utils/__pycache__/

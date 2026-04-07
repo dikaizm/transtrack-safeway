@@ -32,4 +32,5 @@ class TaskResultResponse(BaseModel):
     status: str
     conditions: str | None
     frames_analyzed: int | None
+    processing_time_sec: float | None = None
     detections: list[DetectionItem]

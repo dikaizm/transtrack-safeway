@@ -1,269 +1,41 @@
-"""
-RT-DETR pipeline — Apache 2.0 licensed.
-
-Architecture: Real-Time Detection Transformer with ResNet backbone.
-Paper: "DETRs Beat YOLOs on Real-time Object Detection" (CVPR 2024)
-Source: https://github.com/lyuwenyu/RT-DETR
-HuggingFace: https://huggingface.co/PekingU/rtdetr_r50vd
-
-Dependencies:
-    pip install transformers torch torchvision albumentations pycocotools torchmetrics
-"""
-
-import json
-import os
+import shutil
+import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
+import cv2
 import mlflow
-import numpy as np
-import torch
 import yaml
-from torch.optim import AdamW
-from torch.utils.data import DataLoader, Dataset
-from torchmetrics.detection.mean_ap import MeanAveragePrecision
-from transformers import RTDetrForObjectDetection, RTDetrImageProcessor, get_cosine_schedule_with_warmup
+from ultralytics import RTDETR
 
 from pipelines.base import BasePipeline
 from pipelines.registry import register_pipeline
+from utils.gdrive import (
+    build_service,
+    get_run_weights_folder,
+    get_run_visuals_folder,
+    upload_and_share,
+)
 from utils.mlflow_helper import (
     log_artifacts_from_dir,
     log_config,
     log_metrics_per_condition,
     setup_mlflow,
+    tag_gdrive_link,
 )
+from utils.preprocess import preprocess_frame
 
-try:
-    import albumentations as A
-    from albumentations.pytorch import ToTensorV2
-    HAS_ALBUMENTATIONS = True
-except ImportError:
-    HAS_ALBUMENTATIONS = False
-
-try:
-    import cv2
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
-
-
-# ------------------------------------------------------------------ #
-#  YOLO → COCO converter                                               #
-# ------------------------------------------------------------------ #
-
-def _yolo_to_coco(data_dir: Path, classes: list[str]) -> None:
-    """Convert YOLO-format labels to COCO annotations.json in-place.
-
-    YOLO label format (normalized): class_id cx cy w h
-    COCO bbox format (absolute pixels): [x_min, y_min, w, h]
-    """
-    ann_file = data_dir / "annotations.json"
-    if ann_file.exists():
-        return  # already converted
-
-    images_dir = data_dir / "images"
-    labels_dir = data_dir / "labels"
-
-    IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-    img_paths = sorted(p for p in images_dir.iterdir() if p.suffix.lower() in IMG_EXTS)
-
-    categories = [{"id": i, "name": name} for i, name in enumerate(classes)]
-    coco_images = []
-    coco_annotations = []
-    ann_id = 0
-
-    for img_id, img_path in enumerate(img_paths):
-        # Get image size without decoding full image when possible
-        if HAS_CV2:
-            import cv2 as _cv2
-            img = _cv2.imread(str(img_path))
-            if img is None:
-                continue
-            h, w = img.shape[:2]
-        else:
-            from PIL import Image as _PILImage
-            with _PILImage.open(img_path) as _im:
-                w, h = _im.size
-
-        coco_images.append({
-            "id": img_id,
-            "file_name": img_path.name,
-            "width": w,
-            "height": h,
-        })
-
-        label_path = labels_dir / (img_path.stem + ".txt")
-        if not label_path.exists():
-            continue
-
-        with open(label_path) as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) != 5:
-                    continue
-                cls_id, cx, cy, bw, bh = int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
-                x_min = (cx - bw / 2) * w
-                y_min = (cy - bh / 2) * h
-                abs_w  = bw * w
-                abs_h  = bh * h
-                coco_annotations.append({
-                    "id": ann_id,
-                    "image_id": img_id,
-                    "category_id": cls_id,
-                    "bbox": [x_min, y_min, abs_w, abs_h],
-                    "area": abs_w * abs_h,
-                    "iscrowd": 0,
-                })
-                ann_id += 1
-
-    coco_dict = {"images": coco_images, "annotations": coco_annotations, "categories": categories}
-    with open(ann_file, "w") as f:
-        json.dump(coco_dict, f)
-    print(f"[rtdetr] Generated {ann_file} ({len(coco_images)} images, {len(coco_annotations)} annotations)")
-
-
-# ------------------------------------------------------------------ #
-#  Dataset                                                             #
-# ------------------------------------------------------------------ #
-
-class COCODetectionDataset(Dataset):
-    """
-    COCO-format dataset compatible with RT-DETR image processor.
-    Accepts YOLO-format splits (images/ + labels/) and auto-generates
-    annotations.json on first use.
-    """
-
-    def __init__(
-        self,
-        data_dir: str,
-        processor: RTDetrImageProcessor,
-        aug_cfg: dict | None = None,
-        is_train: bool = True,
-        classes: list[str] | None = None,
-    ):
-        self.data_dir = Path(data_dir)
-        self.processor = processor
-        self.is_train = is_train
-
-        # Resolve annotation file: prefer existing COCO json, fall back to YOLO→COCO conversion
-        ann_file = self.data_dir / "annotations.json"
-        roboflow_ann = self.data_dir / "_annotations.coco.json"
-        if not ann_file.exists() and roboflow_ann.exists():
-            roboflow_ann.rename(ann_file)
-        if not ann_file.exists():
-            _yolo_to_coco(self.data_dir, classes or [])
-
-        with open(ann_file) as f:
-            coco = json.load(f)
-
-        self.images = {img["id"]: img for img in coco["images"]}
-        self.image_ids = [img["id"] for img in coco["images"]]
-
-        # Roboflow COCO exports use 1-indexed category IDs; remap to 0-indexed
-        # so they match the model's id2label={0: class0, 1: class1, ...}.
-        cat_ids = sorted({c["id"] for c in coco.get("categories", [])})
-        cat_id_remap = {old: new for new, old in enumerate(cat_ids)}
-
-        # Group annotations by image id, applying the category remap
-        self.annotations: dict[int, list] = {id_: [] for id_ in self.image_ids}
-        for ann in coco.get("annotations", []):
-            remapped = dict(ann)
-            remapped["category_id"] = cat_id_remap.get(ann["category_id"], ann["category_id"])
-            self.annotations[ann["image_id"]].append(remapped)
-
-        self.transform = self._build_transform(aug_cfg or {}) if is_train else None
-
-    def __len__(self) -> int:
-        return len(self.image_ids)
-
-    def __getitem__(self, idx: int):
-        image_id = self.image_ids[idx]
-        image_info = self.images[image_id]
-        image_path = self.data_dir / "images" / image_info["file_name"]
-
-        if HAS_CV2:
-            import cv2
-            image = cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)
-        else:
-            from PIL import Image as PILImage
-            image = np.array(PILImage.open(image_path).convert("RGB"))
-
-        anns = self.annotations[image_id]
-        boxes = [ann["bbox"] for ann in anns]           # [x, y, w, h] COCO format
-        labels = [ann["category_id"] for ann in anns]
-
-        if self.transform and HAS_ALBUMENTATIONS and boxes:
-            h, w = image.shape[:2]
-            # Albumentations expects [x_min, y_min, x_max, y_max]
-            bboxes_xyxy = [
-                [b[0], b[1], b[0] + b[2], b[1] + b[3]] for b in boxes
-            ]
-            transformed = self.transform(
-                image=image,
-                bboxes=bboxes_xyxy,
-                class_labels=labels,
-            )
-            image = transformed["image"]
-            boxes = [
-                [b[0], b[1], b[2] - b[0], b[3] - b[1]]
-                for b in transformed["bboxes"]
-            ]
-            labels = list(transformed["class_labels"])
-
-        target = {
-            "image_id": image_id,
-            "annotations": [
-                {"bbox": b, "category_id": l, "iscrowd": 0, "area": b[2] * b[3]}
-                for b, l in zip(boxes, labels)
-            ],
-        }
-
-        encoding = self.processor(images=image, annotations=target, return_tensors="pt")
-        pixel_values = encoding["pixel_values"].squeeze(0)
-        labels_enc = encoding["labels"][0]
-
-        return pixel_values, labels_enc
-
-    def _build_transform(self, aug_cfg: dict):
-        if not HAS_ALBUMENTATIONS:
-            return None
-        transforms = [
-            A.HorizontalFlip(p=aug_cfg.get("horizontal_flip", 0.5)),
-            A.ColorJitter(
-                brightness=aug_cfg.get("color_jitter", {}).get("brightness", 0.4),
-                contrast=aug_cfg.get("color_jitter", {}).get("contrast", 0.4),
-                saturation=aug_cfg.get("color_jitter", {}).get("saturation", 0.4),
-                hue=aug_cfg.get("color_jitter", {}).get("hue", 0.1),
-                p=0.5,
-            ),
-            A.Blur(blur_limit=aug_cfg.get("blur_limit", 3), p=0.1),
-        ]
-        return A.Compose(
-            transforms,
-            bbox_params=A.BboxParams(
-                format="pascal_voc",
-                label_fields=["class_labels"],
-                min_visibility=0.3,
-            ),
-        )
-
-
-def collate_fn(batch):
-    pixel_values = torch.stack([item[0] for item in batch])
-    labels = [item[1] for item in batch]
-    return pixel_values, labels
-
-
-# ------------------------------------------------------------------ #
-#  Pipeline                                                            #
-# ------------------------------------------------------------------ #
 
 @register_pipeline("rtdetr")
 class RTDETRPipeline(BasePipeline):
     """
-    Training and evaluation pipeline for RT-DETR (Apache 2.0).
-    Uses HuggingFace Transformers implementation.
+    Training and evaluation pipeline for Ultralytics RT-DETR models.
     """
+
+    # ------------------------------------------------------------------ #
+    #  Train                                                               #
+    # ------------------------------------------------------------------ #
 
     def train(self, run_name: str | None = None) -> dict:
         setup_mlflow(
@@ -274,153 +46,100 @@ class RTDETRPipeline(BasePipeline):
         tags = {
             "model_type": "rtdetr",
             "task": "detect",
-            "checkpoint": self.model_cfg.get("checkpoint", ""),
-            "license": "Apache-2.0",
+            "weights": self.model_cfg.get("weights", ""),
         }
+
+        try:
+            from ultralytics import settings as yolo_settings
+            yolo_settings.update({"mlflow": False})
+        except Exception:
+            pass
 
         with mlflow.start_run(run_name=run_name, tags=tags) as run:
             log_config(self.config)
 
-            classes = self.data_cfg["classes"]
-            id2label = {i: c for i, c in enumerate(classes)}
-            label2id = {c: i for i, c in enumerate(classes)}
+            log_file = Path(tempfile.mktemp(suffix=".log", prefix="train_rtdetr_"))
 
-            processor = RTDetrImageProcessor.from_pretrained(
-                self.model_cfg["checkpoint"]
-            )
-            model = RTDetrForObjectDetection.from_pretrained(
-                self.model_cfg["checkpoint"],
-                id2label=id2label,
-                label2id=label2id,
-                ignore_mismatched_sizes=True,
-            )
+            with self._tee_log(log_file):
+                print(f"Run ID   : {run.info.run_id}")
+                print(f"Weights  : {self.model_cfg.get('weights')}")
+                print(f"Epochs   : {self.train_cfg.get('epochs', 100)}")
+                print(f"Batch    : {self.train_cfg.get('batch', 8)}")
+                print(f"Imgsz    : {self.train_cfg.get('imgsz', 640)}")
+                print(f"Classes  : {self.data_cfg.get('classes', [])}")
 
-            train_ds = COCODetectionDataset(
-                self.data_cfg["train"], processor,
-                aug_cfg=self.aug_cfg, is_train=True, classes=classes,
-            )
-            val_ds = COCODetectionDataset(
-                self.data_cfg["val"], processor, is_train=False, classes=classes,
-            )
+                print("\nPreprocessing training images...")
+                self._preprocess_dataset_images(self.data_cfg["train"])
+                self._preprocess_dataset_images(self.data_cfg["val"])
 
-            train_loader = DataLoader(
-                train_ds, batch_size=self.train_cfg.get("batch", 8),
-                shuffle=True, collate_fn=collate_fn,
-                num_workers=self.train_cfg.get("workers", 4),
-            )
-            val_loader = DataLoader(
-                val_ds, batch_size=self.train_cfg.get("batch", 8),
-                shuffle=False, collate_fn=collate_fn,
-                num_workers=self.train_cfg.get("workers", 4),
-            )
+                dataset_yaml = self._write_dataset_yaml()
+                model = RTDETR(self.model_cfg["weights"])
 
-            device = torch.device(
-                self.train_cfg.get("device", "cuda")
-                if torch.cuda.is_available() else "cpu"
-            )
-            model.to(device)
+                self._register_callbacks(model)
 
-            lr_backbone    = float(self.train_cfg.get("lr_backbone", 1e-5))
-            lr_transformer = float(self.train_cfg.get("lr_transformer", 5e-5))
-            lr_head        = float(self.train_cfg.get("lr", 1e-4))
-            weight_decay   = float(self.train_cfg.get("weight_decay", 1e-4))
-
-            # 3 param groups: backbone (pretrained, lowest lr) /
-            # transformer encoder+decoder (pretrained, medium lr) /
-            # class heads (randomly reinit, highest lr)
-            RANDOM_HEAD_KEYS = {"enc_score_head", "class_embed", "denoising_class_embed"}
-            backbone_params    = list(model.model.backbone.parameters())
-            head_params        = [p for n, p in model.named_parameters()
-                                  if any(k in n for k in RANDOM_HEAD_KEYS)]
-            transformer_params = [p for n, p in model.named_parameters()
-                                  if "backbone" not in n
-                                  and not any(k in n for k in RANDOM_HEAD_KEYS)]
-
-            optimizer_backbone    = AdamW(backbone_params,    lr=lr_backbone,    weight_decay=weight_decay)
-            optimizer_transformer = AdamW(transformer_params, lr=lr_transformer, weight_decay=weight_decay)
-            optimizer_head        = AdamW(head_params,        lr=lr_head,        weight_decay=weight_decay)
-
-            epochs        = self.train_cfg.get("epochs", 100)
-            total_steps   = len(train_loader) * epochs
-            warmup_steps  = min(int(self.train_cfg.get("warmup_steps", 500)), total_steps // 10)
-
-            # Linear warmup → cosine decay, stepped per batch
-            scheduler_backbone    = get_cosine_schedule_with_warmup(optimizer_backbone,    warmup_steps, total_steps)
-            scheduler_transformer = get_cosine_schedule_with_warmup(optimizer_transformer, warmup_steps, total_steps)
-            scheduler_head        = get_cosine_schedule_with_warmup(optimizer_head,        warmup_steps, total_steps)
-
-            output_dir = Path(self.train_cfg.get("output_dir", "runs/rtdetr"))
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            best_map = 0.0
-            patience = self.train_cfg.get("patience", 20)
-            patience_counter = 0
-            final_metrics = {}
-
-            for epoch in range(epochs):
-                # --- Train ---
-                model.train()
-                train_loss = 0.0
-                for pixel_values, labels in train_loader:
-                    pixel_values = pixel_values.to(device)
-                    labels = [{k: v.to(device) for k, v in lbl.items()} for lbl in labels]
-
-                    outputs = model(pixel_values=pixel_values, labels=labels)
-                    loss = outputs.loss
-
-                    optimizer_backbone.zero_grad()
-                    optimizer_transformer.zero_grad()
-                    optimizer_head.zero_grad()
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(),
-                        self.train_cfg.get("gradient_clip", 1.0),
-                    )
-                    optimizer_backbone.step()
-                    optimizer_transformer.step()
-                    optimizer_head.step()
-                    scheduler_backbone.step()
-                    scheduler_transformer.step()
-                    scheduler_head.step()
-                    train_loss += loss.item()
-                avg_train_loss = train_loss / len(train_loader)
-
-                # --- Validate ---
-                val_metrics = self._run_val(model, val_loader, processor, device)
-                current_map = val_metrics.get("mAP50", 0.0)
-
-                epoch_metrics = {
-                    "train/loss": avg_train_loss,
-                    **{f"val/{k}": v for k, v in val_metrics.items()},
-                }
-                mlflow.log_metrics(epoch_metrics, step=epoch)
-
-                print(
-                    f"Epoch {epoch+1}/{epochs} | "
-                    f"loss={avg_train_loss:.4f} | "
-                    f"mAP50={current_map:.4f}"
+                results = model.train(
+                    data=dataset_yaml,
+                    epochs=self.train_cfg.get("epochs", 100),
+                    batch=self.train_cfg.get("batch", 8),
+                    imgsz=self.train_cfg.get("imgsz", 640),
+                    lr0=self.train_cfg.get("lr0", 0.0001),
+                    lrf=self.train_cfg.get("lrf", 0.01),
+                    weight_decay=self.train_cfg.get("weight_decay", 0.0001),
+                    warmup_epochs=self.train_cfg.get("warmup_epochs", 3),
+                    patience=self.train_cfg.get("patience", 20),
+                    save_period=self.train_cfg.get("save_period", 10),
+                    workers=self.train_cfg.get("workers", 4),
+                    device=self.train_cfg.get("device", 0),
+                    verbose=True,
+                    # Augmentation
+                    hsv_h=self.aug_cfg.get("hsv_h", 0.015),
+                    hsv_s=self.aug_cfg.get("hsv_s", 0.7),
+                    hsv_v=self.aug_cfg.get("hsv_v", 0.4),
+                    translate=self.aug_cfg.get("translate", 0.1),
+                    scale=self.aug_cfg.get("scale", 0.5),
+                    fliplr=self.aug_cfg.get("fliplr", 0.5),
+                    mosaic=self.aug_cfg.get("mosaic", 0.0),  # RT-DETR: mosaic off by default
+                    project="runs/rtdetr",
+                    exist_ok=True,
                 )
 
-                # --- Save best ---
-                if current_map > best_map:
-                    best_map = current_map
-                    patience_counter = 0
-                    model.save_pretrained(str(output_dir / "best"))
-                    processor.save_pretrained(str(output_dir / "best"))
-                else:
-                    patience_counter += 1
-                    if patience_counter >= patience:
-                        print(f"Early stopping at epoch {epoch+1}")
-                        break
+                save_dir = Path(results.save_dir)
+                final_metrics = self._extract_final_metrics(results)
 
-                final_metrics = epoch_metrics
+                mlflow.log_metrics(final_metrics)
+                log_artifacts_from_dir(save_dir, artifact_path="training_results")
 
-            mlflow.log_metrics({"best/mAP50": best_map})
-            log_artifacts_from_dir(output_dir / "best", artifact_path="weights")
+                best_weights = save_dir / "weights" / "best.pt"
+                if best_weights.exists():
+                    mlflow.log_artifact(str(best_weights), artifact_path="weights")
 
-            print(f"\nTraining complete. Run ID: {run.info.run_id}")
-            print(f"Best mAP50: {best_map:.4f}")
-            return {**final_metrics, "best/mAP50": best_map}
+                mlflow.set_tag("best_weights", str(best_weights))
+                mlflow.set_tag("run_id", run.info.run_id)
+
+                print(f"\nTraining complete. Run ID: {run.info.run_id}")
+                print(f"Best weights: {best_weights}")
+
+                if best_weights.exists():
+                    try:
+                        gdrive_run = run_name or run.info.run_id
+                        svc        = build_service()
+                        folder_id  = get_run_weights_folder(svc, gdrive_run, "det")
+                        link       = upload_and_share(svc, best_weights, folder_id)
+                        tag_gdrive_link(run.info.run_id, "gdrive_det_weights", link)
+                        print(f"GDrive weights: {link}")
+                    except Exception as e:
+                        print(f"GDrive weights upload failed (non-fatal): {e}")
+
+            if log_file.exists():
+                mlflow.log_artifact(str(log_file), artifact_path="logs")
+                log_file.unlink(missing_ok=True)
+
+            final_metrics["_best_weights"] = str(best_weights)
+            return final_metrics
+
+    # ------------------------------------------------------------------ #
+    #  Evaluate                                                            #
+    # ------------------------------------------------------------------ #
 
     def evaluate(
         self,
@@ -436,118 +155,362 @@ class RTDETRPipeline(BasePipeline):
         model_path = Path(model_path)
         test_cfg = self.data_cfg.get("test", {})
 
+        def _has_images(path: str) -> bool:
+            p = Path(path) / "images" if path else None
+            if p is None or not p.exists():
+                return False
+            return any(p.glob("*.*"))
+
         if conditions is None:
-            conditions = [k for k, v in test_cfg.items() if Path(v).exists()]
+            conditions = [
+                k for k in ["day", "wet", "night"]
+                if _has_images(test_cfg.get(k, ""))
+            ]
         if not conditions:
+            print(
+                "Warning: no per-condition test dirs found. "
+                "Falling back to aggregate 'all'."
+            )
             conditions = ["all"]
 
         all_metrics: dict[str, dict] = {}
+        classes = self.data_cfg.get("classes", [])
         tags = {
             "model_type": "rtdetr",
             "task": "detect",
-            "license": "Apache-2.0",
             "model_path": str(model_path),
+            "eval_conditions": ",".join(conditions),
         }
 
-        with mlflow.start_run(run_name=run_name or f"eval-rtdetr-{model_path.name}", tags=tags):
+        with mlflow.start_run(run_name=run_name or f"eval-rtdetr-{model_path.stem}", tags=tags):
             mlflow.log_param("model_path", str(model_path))
-            model, processor = self.load_model(model_path)
+            mlflow.log_param("conditions", ",".join(conditions))
 
-            device = torch.device(
-                self.train_cfg.get("device", "cuda")
-                if torch.cuda.is_available() else "cpu"
-            )
-            model.to(device)
+            model = self.load_model(model_path)
 
             for condition in conditions:
                 data_path = test_cfg.get(condition)
-                if not data_path or not Path(data_path).exists():
-                    print(f"Skipping '{condition}' — path not found: {data_path}")
-                    continue
+                if not data_path or not _has_images(data_path):
+                    fallback = test_cfg.get("all")
+                    if fallback and _has_images(fallback):
+                        print(
+                            f"Warning: condition '{condition}' dir is empty — "
+                            f"falling back to default test set: {fallback}"
+                        )
+                        data_path = fallback
+                    else:
+                        print(f"Skipping condition '{condition}' — no images found.")
+                        continue
 
                 print(f"\nEvaluating on condition: {condition}")
-                ds = COCODetectionDataset(data_path, processor, is_train=False,
-                                          classes=self.data_cfg.get("classes", []))
-                loader = DataLoader(ds, batch_size=4, collate_fn=collate_fn,
-                                    num_workers=self.train_cfg.get("workers", 4))
 
-                metrics = self._run_val(model, loader, processor, device)
-                all_metrics[condition] = metrics
-                log_metrics_per_condition(metrics, condition)
+                self._preprocess_dataset_images(data_path)
+                dataset_yaml = self._write_dataset_yaml(split_override=data_path)
 
-        return all_metrics
+                metrics = model.val(
+                    data=dataset_yaml,
+                    split="test",
+                    imgsz=self.train_cfg.get("imgsz", 640),
+                    device=self.train_cfg.get("device", 0),
+                )
 
-    def load_model(self, model_path: str | Path):
-        model_path = Path(model_path)
-        processor = RTDetrImageProcessor.from_pretrained(str(model_path))
-        model = RTDetrForObjectDetection.from_pretrained(str(model_path))
-        return model, processor
+                condition_metrics = self._extract_eval_metrics(metrics, condition)
+                all_metrics[condition] = condition_metrics
+                log_metrics_per_condition(condition_metrics, condition)
+
+                if hasattr(metrics, "confusion_matrix"):
+                    self._log_confusion_matrix(metrics, condition)
+
+                self._log_visual_samples(model, condition, data_path)
+
+            if len(all_metrics) > 1:
+                self._log_condition_summary(all_metrics, classes)
+
+            print("\nEvaluation complete.")
+            return all_metrics
+
+    # ------------------------------------------------------------------ #
+    #  Load model                                                          #
+    # ------------------------------------------------------------------ #
+
+    def load_model(self, model_path: str | Path) -> RTDETR:
+        return RTDETR(str(model_path))
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
     # ------------------------------------------------------------------ #
 
-    def _run_val(self, model, loader, processor, device) -> dict[str, float]:
-        model.eval()
-        metric = MeanAveragePrecision(iou_type="bbox", max_detection_thresholds=[1, 10, 300])
-        classes = self.data_cfg["classes"]
+    def _preprocess_dataset_images(self, data_dir: str) -> None:
+        images_dir = Path(data_dir) / "images"
+        if not images_dir.exists():
+            return
 
-        with torch.no_grad():
-            for pixel_values, labels in loader:
-                pixel_values = pixel_values.to(device)
-                B, _, H, W = pixel_values.shape
+        image_paths = list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png"))
+        counts = {"night": 0, "dusty": 0, "day": 0}
 
-                outputs = model(pixel_values=pixel_values)
+        for path in image_paths:
+            frame = cv2.imread(str(path))
+            if frame is None:
+                continue
+            processed, condition = preprocess_frame(frame)
+            counts[condition] += 1
+            if condition != "day":
+                cv2.imwrite(str(path), processed)
 
-                # Post-process predictions → absolute [x1,y1,x2,y2] in H×W pixel space
-                orig_sizes = torch.tensor([[H, W]], dtype=torch.long).repeat(B, 1)
-                results = processor.post_process_object_detection(
-                    outputs,
-                    threshold=0.0,
-                    target_sizes=orig_sizes,
-                )
+        print(
+            f"  Preprocessing {data_dir}: "
+            f"{counts['day']} day | {counts['night']} night | {counts['dusty']} dusty"
+        )
 
-                preds = [
-                    {
-                        "boxes": r["boxes"].cpu(),
-                        "scores": r["scores"].cpu(),
-                        "labels": r["labels"].cpu(),
-                    }
-                    for r in results
-                ]
+    def _write_dataset_yaml(self, split_override: str | None = None) -> str:
+        classes = self.data_cfg.get("classes", [])
+        test_path = split_override or self.data_cfg.get("test", {}).get("all", "")
 
-                # RTDetrImageProcessor encodes targets as normalized [cx,cy,w,h].
-                # Convert to absolute [x1,y1,x2,y2] to match prediction format.
-                targets = []
-                for lbl in labels:
-                    boxes = lbl["boxes"].cpu().float()   # normalized [cx,cy,w,h]
-                    if boxes.numel() > 0:
-                        cx, cy, bw, bh = boxes[:, 0] * W, boxes[:, 1] * H, boxes[:, 2] * W, boxes[:, 3] * H
-                        boxes_xyxy = torch.stack([cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], dim=1)
-                    else:
-                        boxes_xyxy = torch.zeros((0, 4))
-                    targets.append({
-                        "boxes": boxes_xyxy,
-                        "labels": lbl["class_labels"].cpu(),
-                    })
+        dataset = {
+            "path": "/",
+            "train": str(Path(self.data_cfg.get("train", "data/train")).resolve()),
+            "val":   str(Path(self.data_cfg.get("val",   "data/val")).resolve()),
+            "test":  str(Path(test_path).resolve()) if test_path else "",
+            "nc": len(classes),
+            "names": classes,
+        }
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
+        yaml.dump(dataset, tmp)
+        tmp.close()
+        return tmp.name
 
-                metric.update(preds, targets)
+    @contextmanager
+    def _tee_log(self, log_path: Path):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = log_path.open("w", buffering=1)
 
-        result = metric.compute()
+        class _Tee:
+            def __init__(self, *streams):
+                self._streams = streams
 
-        metrics: dict[str, float] = {
-            "mAP50":    float(result.get("map_50", 0.0)),
-            "mAP50-95": float(result.get("map", 0.0)),
-            "mAP_small": float(result.get("map_small", 0.0)),
+            def write(self, data):
+                for s in self._streams:
+                    s.write(data)
+
+            def flush(self):
+                for s in self._streams:
+                    s.flush()
+
+            def isatty(self):
+                return False
+
+        orig_stdout = sys.stdout
+        sys.stdout = _Tee(orig_stdout, log_fh)
+        try:
+            yield
+        finally:
+            sys.stdout = orig_stdout
+            log_fh.close()
+
+    def _register_callbacks(self, model: RTDETR) -> None:
+        def on_train_epoch_end(trainer):
+            epoch = trainer.epoch
+            metrics: dict[str, float] = {}
+
+            try:
+                loss_items = trainer.label_loss_items(trainer.tloss, prefix="train")
+                metrics.update({
+                    k: float(v) for k, v in loss_items.items()
+                    if isinstance(v, (int, float))
+                })
+            except Exception:
+                pass
+
+            try:
+                for i, pg in enumerate(trainer.optimizer.param_groups):
+                    metrics[f"lr/pg{i}"] = float(pg["lr"])
+            except Exception:
+                pass
+
+            if metrics:
+                mlflow.log_metrics(metrics, step=epoch)
+                summary = "  ".join(f"{k}={v:.4f}" for k, v in metrics.items())
+                print(f"[Epoch {epoch+1}] {summary}")
+
+        def on_val_end(validator):
+            try:
+                raw = validator.metrics.results_dict
+            except AttributeError:
+                return
+            val_metrics = {
+                f"val/{k}".replace("(", "").replace(")", ""): float(v)
+                for k, v in raw.items()
+                if isinstance(v, (int, float))
+            }
+            step = getattr(validator, "epoch", None)
+            mlflow.log_metrics(val_metrics, step=step)
+            metrics_str = "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items())
+            print(f"[Val] {metrics_str}")
+
+        model.add_callback("on_train_epoch_end", on_train_epoch_end)
+        model.add_callback("on_val_end", on_val_end)
+
+    def _extract_final_metrics(self, results) -> dict[str, float]:
+        box = results.results_dict
+        return {
+            "final/precision": float(box.get("metrics/precision(B)", 0)),
+            "final/recall":    float(box.get("metrics/recall(B)", 0)),
+            "final/mAP50":     float(box.get("metrics/mAP50(B)", 0)),
+            "final/mAP50-95":  float(box.get("metrics/mAP50-95(B)", 0)),
         }
 
-        # Per-class mAP (torchmetrics returns a 0-d tensor when unavailable)
-        per_class = result.get("map_per_class", None)
-        if (per_class is not None
-                and isinstance(per_class, torch.Tensor)
-                and per_class.ndim > 0
-                and len(per_class) == len(classes)):
-            for i, cls_name in enumerate(classes):
-                metrics[f"mAP50-95/{cls_name}"] = float(per_class[i])
+    def _extract_eval_metrics(self, metrics, condition: str) -> dict[str, float]:
+        classes = self.data_cfg.get("classes", [])
+        box = metrics.box
+        result = {
+            "mAP50":     float(box.map50),
+            "mAP50-95":  float(box.map),
+            "precision": float(box.mp),
+            "recall":    float(box.mr),
+        }
 
-        return metrics
+        if hasattr(box, "ap_class_index") and box.ap_class_index is not None:
+            for idx, class_idx in enumerate(box.ap_class_index):
+                if class_idx < len(classes):
+                    class_name = classes[class_idx]
+                    result[f"mAP50/{class_name}"]     = float(box.ap50[idx])
+                    result[f"mAP50-95/{class_name}"]  = float(box.ap[idx])
+
+        return result
+
+    def _log_condition_summary(
+        self,
+        all_metrics: dict[str, dict],
+        classes: list[str],
+    ) -> None:
+        conditions = list(all_metrics.keys())
+        col_w = 12
+
+        header  = f"{'Class':<22}" + "".join(f"{c:>{col_w}}" for c in conditions)
+        divider = "-" * len(header)
+        rows = [header, divider]
+
+        agg_row = f"{'mAP50 (all)':<22}"
+        for cond in conditions:
+            val = all_metrics[cond].get("mAP50", 0.0)
+            agg_row += f"{val:>{col_w}.4f}"
+        rows.append(agg_row)
+        rows.append(divider)
+
+        for cls in classes:
+            row = f"{cls:<22}"
+            for cond in conditions:
+                val = all_metrics[cond].get(f"mAP50/{cls}", 0.0)
+                row += f"{val:>{col_w}.4f}"
+            rows.append(row)
+
+        summary = "\n".join(rows)
+        print(f"\n{'='*len(divider)}")
+        print("CONDITION SUMMARY (mAP50)")
+        print(summary)
+        print(f"{'='*len(divider)}\n")
+
+        import tempfile as _tmp
+        with _tmp.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, prefix="condition_summary_"
+        ) as f:
+            f.write("CONDITION SUMMARY (mAP50)\n\n")
+            f.write(summary)
+            tmp_path = f.name
+
+        mlflow.log_artifact(tmp_path, artifact_path="evaluation")
+
+        for cond in conditions:
+            mlflow.log_metric(f"summary/mAP50_{cond}", all_metrics[cond].get("mAP50", 0.0))
+
+    def _log_visual_samples(
+        self,
+        model: RTDETR,
+        condition: str,
+        data_path: str,
+        n_samples: int = 30,
+        fps: int = 3,
+    ) -> None:
+        images_dir = Path(data_path) / "images"
+        if not images_dir.exists():
+            return
+
+        image_paths = sorted(
+            list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png"))
+        )
+        if not image_paths:
+            return
+
+        step = max(1, len(image_paths) // n_samples)
+        samples = image_paths[::step][:n_samples]
+
+        print(f"  Generating visual video for condition '{condition}': {len(samples)} frames @ {fps}fps")
+
+        imgsz  = self.train_cfg.get("imgsz", 640)
+        device = self.train_cfg.get("device", 0)
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix=f"visuals_{condition}_"))
+        try:
+            results = model.predict(
+                source=[str(p) for p in samples],
+                imgsz=imgsz,
+                device=device,
+                verbose=False,
+                conf=0.25,
+            )
+
+            frames = []
+            for result in results:
+                annotated = result.plot(labels=True, conf=True, boxes=True, line_width=2)
+                label = f"RTDETR | {condition}"
+                cv2.rectangle(annotated, (0, 0), (len(label) * 11 + 10, 30), (0, 0, 0), -1)
+                cv2.putText(annotated, label, (6, 20), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6, (255, 255, 255), 1, cv2.LINE_AA)
+                frames.append(annotated)
+
+            if frames:
+                h, w = frames[0].shape[:2]
+                out_path = tmp_dir / f"rtdetr_{condition}.mp4"
+                for fourcc_str in ("avc1", "mp4v"):
+                    fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+                    writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
+                    if writer.isOpened():
+                        break
+                for frame in frames:
+                    writer.write(frame)
+                writer.release()
+
+                mlflow.log_artifact(str(out_path), artifact_path=f"visuals/{condition}")
+                duration = len(frames) / fps
+                print(f"  Video logged to MLflow: visuals/{condition}/{out_path.name} (~{duration:.1f}s)")
+
+                try:
+                    active = mlflow.active_run()
+                    if active:
+                        svc       = build_service()
+                        run_label = active.info.run_name or active.info.run_id
+                        folder_id = get_run_visuals_folder(svc, run_label)
+                        link      = upload_and_share(svc, out_path, folder_id)
+                        tag_gdrive_link(active.info.run_id, f"gdrive_vis_det_{condition}", link)
+                        print(f"  GDrive video: {link}")
+                except Exception as e:
+                    print(f"  GDrive video upload failed (non-fatal): {e}")
+
+        except Exception as e:
+            print(f"  Could not generate visual video for {condition}: {e}")
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def _log_confusion_matrix(self, metrics, condition: str) -> None:
+        try:
+            import matplotlib.pyplot as plt
+            cm = metrics.confusion_matrix
+            fig, ax = plt.subplots(figsize=(8, 6))
+            cm.plot(ax=ax)
+            ax.set_title(f"Confusion Matrix — {condition}")
+            path = f"/tmp/confusion_matrix_{condition}.png"
+            fig.savefig(path, bbox_inches="tight")
+            plt.close(fig)
+            mlflow.log_artifact(path, artifact_path=f"confusion_matrix/{condition}")
+        except Exception as e:
+            print(f"Could not log confusion matrix for {condition}: {e}")

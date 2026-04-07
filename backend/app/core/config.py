@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     # Storage
     temp_video_dir: str = "/tmp/transtrack/videos"
+    rendered_video_dir: str = "/tmp/transtrack/rendered"
     max_video_size_mb: int = 50
     max_video_duration_sec: int = 120
 
