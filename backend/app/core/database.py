@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.core.config import settings
@@ -22,3 +22,20 @@ def get_db():
 def create_tables():
     from app.models import task  # noqa: F401 — ensures models are registered
     Base.metadata.create_all(bind=engine)
+
+
+def upgrade_schema():
+    """Add/remove columns on existing tables without Alembic."""
+    with engine.connect() as conn:
+        for stmt in [
+            # additions
+            "ALTER TABLE detection_tasks ADD COLUMN IF NOT EXISTS webhook_url TEXT",
+            "ALTER TABLE detection_tasks ADD COLUMN IF NOT EXISTS frames_processed INTEGER",
+            "ALTER TABLE detections ADD COLUMN IF NOT EXISTS camera_condition VARCHAR(10)",
+            "ALTER TABLE detections ADD COLUMN IF NOT EXISTS snapshot_path TEXT",
+            # removals
+            "ALTER TABLE detection_tasks DROP COLUMN IF EXISTS render_video",
+            "ALTER TABLE detection_tasks DROP COLUMN IF EXISTS video_url",
+        ]:
+            conn.execute(text(stmt))
+        conn.commit()

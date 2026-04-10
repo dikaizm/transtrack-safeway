@@ -2,6 +2,7 @@ venv/
 data/
 src/__pycache__/
 models/
+!backend/app/models/
 yolov5/
 runs/
 yolov8m-seg.pt

@@ -8,14 +8,18 @@ Flow:
   4. Road segmentation    (YOLOv8n-seg) → drivable_area mask
   5. Hazard detection     (YOLOv8m)     → filtered by road mask
   6. Temporal smoothing   (≥2 of 3 frames for road classes, ≥1 for traffic_sign)
-  7. Persist to DB, delete temp video
+  7. Save per-frame snapshots with all bboxes drawn
+  8. Render annotated MP4
+  9. Persist to DB, delete temp video
 """
 
 import os
 import shutil
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
 
 import cv2
 from sqlalchemy.orm import Session
@@ -30,13 +34,21 @@ from app.pipeline.postprocessor import temporal_smooth
 from app.pipeline.preprocessor import preprocess
 from app.pipeline.renderer import render_video
 from app.pipeline.segmentation import get_road_mask
+from app.pipeline.webhook import fire_webhook
 
 CLASS_NAMES = ["road_depression", "mud_patch", "soil_mound", "traffic_sign"]
+
+_BBOX_COLORS = {
+    "road_depression": (0, 0, 255),
+    "mud_patch":       (0, 165, 255),
+    "soil_mound":      (0, 255, 255),
+    "traffic_sign":    (0, 255, 0),
+}
 
 
 @celery_app.task(bind=True, name="detect.run_pipeline")
 def run_detection_pipeline(
-    self, task_id: str, video_path: str, render: bool = False
+    self, task_id: str, video_path: str, webhook_url: str | None = None
 ) -> None:
     db: Session = SessionLocal()
     frame_dir = tempfile.mkdtemp(prefix=f"frames_{task_id}_")
@@ -45,34 +57,57 @@ def run_detection_pipeline(
         _update_status(db, task_id, "processing")
         t_start = time.monotonic()
 
-        # 1. Extract frames at 3fps (time-based)
+        if webhook_url:
+            fire_webhook(webhook_url, _webhook_payload(
+                task_id=task_id, event="started", status="processing",
+                frames_processed=0, frames_total=0, progress_pct=0.0,
+                condition_summary={},
+            ))
+
+        # 1. Extract frames at configured fps
         frame_paths = extract_frames(
             video_path,
             frame_dir,
             sample_fps=settings.frame_sample_fps,
         )
-        _update_field(db, task_id, frames_to_process=len(frame_paths))
+        total_frames = len(frame_paths)
+        _update_field(db, task_id, frames_to_process=total_frames)
 
         # 2-5. Per-frame pipeline
         frame_detections: list[list[dict]] = []
         condition_counts: Counter = Counter()
 
-        for frame_path in frame_paths:
+        for i, frame_path in enumerate(frame_paths):
             frame = cv2.imread(frame_path)
             if frame is None:
                 frame_detections.append([])
                 continue
 
-            # Preprocess: CLAHE for night/dusty, no-op for day
             frame, condition = preprocess(frame)
             condition_counts[condition] += 1
 
-            # Road segmentation → drivable_area mask
             road_mask = get_road_mask(frame)
-
-            # Safety hazard detection, filtered by road mask
             dets = detect_hazards(frame, road_mask, CLASS_NAMES)
+
+            for d in dets:
+                d["camera_condition"] = condition
+
             frame_detections.append(dets)
+
+            if (i + 1) % 10 == 0 or i == total_frames - 1:
+                _update_field(db, task_id, frames_processed=i + 1)
+
+                if webhook_url and total_frames > 0:
+                    pct = (i + 1) / total_frames * 100
+                    prev_pct = i / total_frames * 100
+                    milestones = [25, 50, 75]
+                    if any(prev_pct < m <= pct for m in milestones):
+                        fire_webhook(webhook_url, _webhook_payload(
+                            task_id=task_id, event="progress", status="processing",
+                            frames_processed=i + 1, frames_total=total_frames,
+                            progress_pct=round(pct, 1),
+                            condition_summary=dict(condition_counts),
+                        ))
 
         # 6. Temporal smoothing
         confirmed = temporal_smooth(frame_detections, settings.frame_sample_fps)
@@ -82,24 +117,42 @@ def run_detection_pipeline(
             condition_counts.most_common(1)[0][0] if condition_counts else "day"
         )
 
-        # 7. Optionally render annotated MP4
-        rendered_path = None
-        if render:
-            out_path = os.path.join(settings.rendered_video_dir, f"{task_id}.mp4")
-            render_video(
-                frame_paths,
-                confirmed,
-                out_path,
-                source_fps=float(settings.frame_sample_fps),
-            )
-            rendered_path = out_path
+        # 7. Save per-frame snapshots with all confirmed bboxes drawn
+        _save_snapshots(task_id, frame_paths, confirmed)
 
-        # 8. Persist and clean up
+        # 8. Render annotated MP4
+        out_path = os.path.join(settings.rendered_video_dir, f"{task_id}.mp4")
+        render_video(
+            frame_paths,
+            confirmed,
+            out_path,
+            source_fps=float(settings.frame_sample_fps),
+        )
+
+        # 9. Persist and clean up
         processing_time = round(time.monotonic() - t_start, 2)
-        _save_results(db, task_id, confirmed, dominant_condition, len(frame_paths), rendered_path, processing_time)
+        _save_results(db, task_id, confirmed, dominant_condition, total_frames, out_path, processing_time)
+
+        if webhook_url:
+            fire_webhook(webhook_url, _webhook_payload(
+                task_id=task_id, event="done", status="done",
+                frames_processed=total_frames, frames_total=total_frames,
+                progress_pct=100.0,
+                condition_summary=dict(condition_counts),
+                detections_count=len(confirmed),
+                dominant_condition=dominant_condition,
+                processing_time_sec=processing_time,
+            ))
 
     except Exception as exc:
         _update_status(db, task_id, "failed", error=str(exc))
+        if webhook_url:
+            fire_webhook(webhook_url, _webhook_payload(
+                task_id=task_id, event="failed", status="failed",
+                frames_processed=0, frames_total=0, progress_pct=0.0,
+                condition_summary={},
+                error=str(exc),
+            ))
         raise
 
     finally:
@@ -107,6 +160,84 @@ def run_detection_pipeline(
         shutil.rmtree(frame_dir, ignore_errors=True)
         if os.path.exists(video_path):
             os.remove(video_path)
+
+
+# ------------------------------------------------------------------ #
+#  Snapshot rendering                                                  #
+# ------------------------------------------------------------------ #
+
+def _save_snapshots(task_id: str, frame_paths: list[str], confirmed: list[dict]) -> None:
+    """Render one snapshot per frame that has confirmed detections, with all bboxes drawn."""
+    by_frame: dict[int, list[dict]] = defaultdict(list)
+    for det in confirmed:
+        by_frame[det["frame_index"]].append(det)
+
+    if not by_frame:
+        return
+
+    snap_dir = Path(settings.snapshot_dir) / task_id
+    snap_dir.mkdir(parents=True, exist_ok=True)
+
+    for frame_idx, dets in by_frame.items():
+        frame = cv2.imread(frame_paths[frame_idx])
+        if frame is None:
+            continue
+
+        # Re-apply preprocessing so snapshot matches what the model saw
+        frame, _ = preprocess(frame)
+
+        for det in dets:
+            bbox = det["bbox"]
+            x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+            color = _BBOX_COLORS.get(det["class_name"], (255, 255, 255))
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+            label = f"{det['class_name']} {det['confidence']:.2f}"
+            cv2.putText(frame, label, (x, max(y - 6, 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+
+        snap_path = str(snap_dir / f"frame_{frame_idx:05d}.jpg")
+        cv2.imwrite(snap_path, frame)
+
+        for det in dets:
+            det["snapshot_path"] = snap_path
+
+
+# ------------------------------------------------------------------ #
+#  Webhook payload builder                                             #
+# ------------------------------------------------------------------ #
+
+def _webhook_payload(
+    task_id: str,
+    event: str,
+    status: str,
+    frames_processed: int,
+    frames_total: int,
+    progress_pct: float,
+    condition_summary: dict,
+    detections_count: int | None = None,
+    dominant_condition: str | None = None,
+    processing_time_sec: float | None = None,
+    error: str | None = None,
+) -> dict:
+    payload: dict = {
+        "task_id": task_id,
+        "event": event,
+        "status": status,
+        "frames_processed": frames_processed,
+        "frames_total": frames_total,
+        "progress_pct": progress_pct,
+        "condition_summary": condition_summary,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if detections_count is not None:
+        payload["detections_count"] = detections_count
+    if dominant_condition is not None:
+        payload["dominant_condition"] = dominant_condition
+    if processing_time_sec is not None:
+        payload["processing_time_sec"] = processing_time_sec
+    if error is not None:
+        payload["error"] = error
+    return payload
 
 
 # ------------------------------------------------------------------ #
@@ -141,8 +272,8 @@ def _save_results(
     confirmed: list[dict],
     condition: str,
     frames_analyzed: int,
-    rendered_path: str | None = None,
-    processing_time_sec: float | None = None,
+    rendered_path: str,
+    processing_time_sec: float,
 ) -> None:
     task = db.query(DetectionTask).filter_by(id=task_id).first()
     if not task:
@@ -151,10 +282,8 @@ def _save_results(
     task.status = "done"
     task.conditions = condition
     task.frames_analyzed = frames_analyzed
-    if rendered_path:
-        task.rendered_video_path = rendered_path
-    if processing_time_sec is not None:
-        task.processing_time_sec = processing_time_sec
+    task.rendered_video_path = rendered_path
+    task.processing_time_sec = processing_time_sec
 
     for det in confirmed:
         bbox = det["bbox"]
@@ -169,6 +298,8 @@ def _save_results(
             bbox_w=bbox[2],
             bbox_h=bbox[3],
             zone=det["zone"],
+            camera_condition=det.get("camera_condition"),
+            snapshot_path=det.get("snapshot_path"),
         ))
 
     db.commit()

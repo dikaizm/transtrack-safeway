@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     # Storage
     temp_video_dir: str = "/tmp/transtrack/videos"
     rendered_video_dir: str = "/tmp/transtrack/rendered"
+    snapshot_dir: str = "/tmp/transtrack/snapshots"
     max_video_size_mb: int = 50
     max_video_duration_sec: int = 120
 
@@ -24,6 +25,9 @@ class Settings(BaseSettings):
     detection_confidence: float = 0.25
     segmentation_confidence: float = 0.5
     vehicle_confidence: float = 0.4
+
+    # Webhook
+    webhook_timeout_sec: int = 5
 
     # Task
     task_result_ttl_sec: int = 86400
