@@ -16,6 +16,12 @@ celery_app = Celery(
     include=["app.tasks.detect"],
 )
 
+
+@celery_app.on_after_configure.connect
+def run_migrations(sender, **kwargs):
+    from app.core.database import upgrade_schema
+    upgrade_schema()
+
 celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
