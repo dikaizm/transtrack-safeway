@@ -25,3 +25,6 @@ numpy>=1.24.0
 
 # HTTP
 requests>=2.31.0
+
+# Object storage
+boto3>=1.34.0

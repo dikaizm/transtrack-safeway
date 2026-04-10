@@ -31,11 +31,14 @@ def upgrade_schema():
             # additions
             "ALTER TABLE detection_tasks ADD COLUMN IF NOT EXISTS webhook_url TEXT",
             "ALTER TABLE detection_tasks ADD COLUMN IF NOT EXISTS frames_processed INTEGER",
+            "ALTER TABLE detection_tasks ADD COLUMN IF NOT EXISTS rendered_video_url TEXT",
             "ALTER TABLE detections ADD COLUMN IF NOT EXISTS camera_condition VARCHAR(10)",
-            "ALTER TABLE detections ADD COLUMN IF NOT EXISTS snapshot_path TEXT",
-            # removals
+            "ALTER TABLE detections ADD COLUMN IF NOT EXISTS snapshot_url TEXT",
+            # removals / renames (idempotent)
             "ALTER TABLE detection_tasks DROP COLUMN IF EXISTS render_video",
             "ALTER TABLE detection_tasks DROP COLUMN IF EXISTS video_url",
+            "ALTER TABLE detection_tasks DROP COLUMN IF EXISTS rendered_video_path",
+            "ALTER TABLE detections DROP COLUMN IF EXISTS snapshot_path",
         ]:
             conn.execute(text(stmt))
         conn.commit()

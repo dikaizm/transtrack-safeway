@@ -1,9 +1,9 @@
 import os
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -91,6 +91,12 @@ def get_task_status(task_id: str, db: Session = Depends(get_db)):
     if task.frames_processed is not None and task.frames_to_process:
         progress_pct = round(task.frames_processed / task.frames_to_process * 100, 1)
 
+    processing_time_sec = (
+        task.processing_time_sec
+        if task.status == "done"
+        else round((datetime.now(timezone.utc) - task.created_at).total_seconds(), 2)
+    )
+
     return SuccessResponse(
         message="Task status retrieved.",
         data=TaskStatusResponse(
@@ -99,6 +105,8 @@ def get_task_status(task_id: str, db: Session = Depends(get_db)):
             frames_processed=task.frames_processed,
             frames_to_process=task.frames_to_process,
             progress_pct=progress_pct,
+            created_at=task.created_at,
+            processing_time_sec=processing_time_sec,
         ),
     )
 
@@ -128,11 +136,11 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
     # Deduplicated snapshots — one entry per frame
     seen: dict[int, FrameSnapshot] = {}
     for d in detections:
-        if d.snapshot_path and d.frame_index not in seen:
+        if d.snapshot_url and d.frame_index not in seen:
             seen[d.frame_index] = FrameSnapshot(
                 frame_index=d.frame_index,
                 frame_sec=d.frame_sec,
-                snapshot_url=f"/detect/{task_id}/snapshot/{d.frame_index}",
+                snapshot_url=d.snapshot_url,
             )
 
     return SuccessResponse(
@@ -140,7 +148,7 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
         data=TaskResultResponse(
             task_id=task.id,
             status=task.status,
-            video_url=f"/detect/{task_id}/video",
+            video_url=task.rendered_video_url or "",
             conditions=task.conditions,
             condition_summary=condition_summary,
             frames_analyzed=task.frames_analyzed,
@@ -159,36 +167,4 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
             ],
             snapshots=list(seen.values()),
         ),
-    )
-
-
-@router.get("/{task_id}/snapshot/{frame_index}")
-def get_snapshot(task_id: str, frame_index: int, db: Session = Depends(get_db)):
-    detection = (
-        db.query(Detection)
-        .filter_by(task_id=task_id, frame_index=frame_index)
-        .first()
-    )
-    if not detection or not detection.snapshot_path or not os.path.exists(detection.snapshot_path):
-        raise HTTPException(status_code=404, detail="Snapshot not found.")
-    return FileResponse(detection.snapshot_path, media_type="image/jpeg")
-
-
-@router.get("/{task_id}/video")
-def get_task_video(task_id: str, db: Session = Depends(get_db)):
-    task = db.query(DetectionTask).filter_by(id=task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found.")
-    if task.status != "done":
-        raise HTTPException(
-            status_code=409,
-            detail=f"Task is not done yet. Current status: {task.status}",
-        )
-    if not task.rendered_video_path or not os.path.exists(task.rendered_video_path):
-        raise HTTPException(status_code=404, detail="Rendered video file not found.")
-
-    return FileResponse(
-        task.rendered_video_path,
-        media_type="video/mp4",
-        filename=f"detection_{task_id}.mp4",
     )

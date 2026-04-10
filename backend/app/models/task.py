@@ -23,7 +23,7 @@ class DetectionTask(Base):
     frames_processed: Mapped[int | None] = mapped_column(Integer, nullable=True)
     frames_analyzed: Mapped[int | None] = mapped_column(Integer, nullable=True)
     video_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    rendered_video_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rendered_video_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     processing_time_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -53,6 +53,6 @@ class Detection(Base):
     bbox_h: Mapped[float] = mapped_column(Float)
     zone: Mapped[str] = mapped_column(String(20))  # road_area | full_frame
     camera_condition: Mapped[str | None] = mapped_column(String(10), nullable=True)  # day | night | dusty
-    snapshot_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    snapshot_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     task: Mapped["DetectionTask"] = relationship(back_populates="detections")

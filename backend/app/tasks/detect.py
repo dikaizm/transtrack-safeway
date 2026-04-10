@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from app.core.celery import celery_app
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.core.storage import upload_file
 from app.models.task import Detection, DetectionTask
 from app.pipeline.detector import detect_hazards
 from app.pipeline.extractor import extract_frames
@@ -117,21 +118,22 @@ def run_detection_pipeline(
             condition_counts.most_common(1)[0][0] if condition_counts else "day"
         )
 
-        # 7. Save per-frame snapshots with all confirmed bboxes drawn
+        # 7. Save per-frame snapshots with all confirmed bboxes drawn, upload to S3
         _save_snapshots(task_id, frame_paths, confirmed)
 
-        # 8. Render annotated MP4
-        out_path = os.path.join(settings.rendered_video_dir, f"{task_id}.mp4")
+        # 8. Render annotated MP4, upload to S3
+        local_video_path = os.path.join(settings.rendered_video_dir, f"{task_id}.mp4")
         render_video(
             frame_paths,
             confirmed,
-            out_path,
+            local_video_path,
             source_fps=float(settings.frame_sample_fps),
         )
+        rendered_video_url = upload_file(local_video_path, f"videos/{task_id}.mp4")
 
         # 9. Persist and clean up
         processing_time = round(time.monotonic() - t_start, 2)
-        _save_results(db, task_id, confirmed, dominant_condition, total_frames, out_path, processing_time)
+        _save_results(db, task_id, confirmed, dominant_condition, total_frames, rendered_video_url, processing_time)
 
         if webhook_url:
             fire_webhook(webhook_url, _webhook_payload(
@@ -198,8 +200,9 @@ def _save_snapshots(task_id: str, frame_paths: list[str], confirmed: list[dict])
         snap_path = str(snap_dir / f"frame_{frame_idx:05d}.jpg")
         cv2.imwrite(snap_path, frame)
 
+        s3_url = upload_file(snap_path, f"snapshots/{task_id}/frame_{frame_idx:05d}.jpg")
         for det in dets:
-            det["snapshot_path"] = snap_path
+            det["snapshot_url"] = s3_url
 
 
 # ------------------------------------------------------------------ #
@@ -272,7 +275,7 @@ def _save_results(
     confirmed: list[dict],
     condition: str,
     frames_analyzed: int,
-    rendered_path: str,
+    rendered_video_url: str,
     processing_time_sec: float,
 ) -> None:
     task = db.query(DetectionTask).filter_by(id=task_id).first()
@@ -282,7 +285,7 @@ def _save_results(
     task.status = "done"
     task.conditions = condition
     task.frames_analyzed = frames_analyzed
-    task.rendered_video_path = rendered_path
+    task.rendered_video_url = rendered_video_url
     task.processing_time_sec = processing_time_sec
 
     for det in confirmed:
@@ -299,7 +302,7 @@ def _save_results(
             bbox_h=bbox[3],
             zone=det["zone"],
             camera_condition=det.get("camera_condition"),
-            snapshot_path=det.get("snapshot_path"),
+            snapshot_url=det.get("snapshot_url"),
         ))
 
     db.commit()

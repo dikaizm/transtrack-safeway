@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     segmentation_confidence: float = 0.5
     vehicle_confidence: float = 0.4
 
+    # S3 object storage
+    s3_endpoint_url: str = "https://s3.nevaobjects.id"
+    s3_bucket: str = "transtrack-rdd"
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+
     # Webhook
     webhook_timeout_sec: int = 5
 
