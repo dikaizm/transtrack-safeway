@@ -9,8 +9,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Heavy ML layer — only rebuilds when requirements.base.txt changes
+COPY requirements.base.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.base.txt
+
+# App layer — only rebuilds when requirements.txt changes
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 COPY . .
 
