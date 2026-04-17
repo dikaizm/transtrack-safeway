@@ -1,23 +1,24 @@
 """
 Evaluation entry point.
 
-Always evaluates per condition (day / wet / night) separately.
-Never use only aggregate mAP — it hides poor performance on specific conditions.
-
 Usage:
-    # Evaluate on all available conditions (recommended)
+    # Per-condition evaluation (default — auto-detects day/wet/night dirs)
     python evaluate.py --config config/yolo_detection.yaml --model runs/train/weights/best.pt
 
-    # Evaluate on specific conditions only
-    python evaluate.py --config config/yolo_detection.yaml --model best.pt --conditions day night
+    # Aggregate evaluation on the full test set
+    python evaluate.py --config config/yolo_detection.yaml --model best.pt --eval-mode all
+
+    # Specific conditions only
+    python evaluate.py --config config/yolo_detection.yaml --model best.pt --eval-mode day night
 
     # Custom MLflow run name
     python evaluate.py --config config/yolo_detection.yaml --model best.pt --run-name "eval-v1"
 
 Expected test dataset structure:
-    data/test/day/    images/ + labels/
-    data/test/wet/    images/ + labels/
-    data/test/night/  images/ + labels/
+    data/test/           images/ + labels/   (used by --eval-mode all)
+    data/test/day/       images/ + labels/
+    data/test/wet/       images/ + labels/
+    data/test/night/     images/ + labels/
 """
 
 import argparse
@@ -63,11 +64,13 @@ def main():
         help="Path to trained model weights (e.g. runs/train/weights/best.pt)"
     )
     parser.add_argument(
-        "--conditions", nargs="+", default=None,
-        choices=["all", "day", "wet", "night"],
+        "--eval-mode", nargs="+", default=None,
+        choices=["all", "condition", "day", "wet", "night"],
+        metavar="MODE",
         help=(
-            "Conditions to evaluate on. Defaults to day+wet+night if dirs exist. "
-            "Avoid using 'all' alone — aggregate mAP hides per-condition failures."
+            "Evaluation mode. 'condition' (default) auto-detects day/wet/night dirs. "
+            "'all' evaluates on the aggregate test set. "
+            "Or pass specific conditions: day wet night."
         )
     )
     parser.add_argument(
@@ -88,25 +91,25 @@ def main():
         print("Error: config must specify model.type")
         sys.exit(1)
 
-    # Warn if user explicitly requests aggregate-only evaluation
-    if args.conditions == ["all"]:
-        print(
-            "Warning: evaluating on 'all' only. "
-            "This hides per-condition failures (night/wet). "
-            "Use --conditions day wet night for a complete picture."
-        )
+    # Translate --eval-mode to conditions list for the pipeline
+    eval_mode = args.eval_mode or ["condition"]
+    if "condition" in eval_mode:
+        # None triggers auto-detection of day/wet/night dirs inside the pipeline
+        conditions = None
+    else:
+        conditions = eval_mode  # e.g. ["all"] or ["day", "wet"]
 
     print(f"Pipeline   : {pipeline_type}")
     print(f"Task       : {config['model'].get('task', 'detect')}")
     print(f"Model      : {model_path}")
-    print(f"Conditions : {args.conditions or 'day + wet + night (auto)'}")
+    print(f"Eval mode  : {' + '.join(eval_mode)}")
     print(f"MLflow     : {config['mlflow']['tracking_uri']}")
     print()
 
     pipeline = get_pipeline(pipeline_type, config)
     results = pipeline.evaluate(
         model_path=model_path,
-        conditions=args.conditions,
+        conditions=conditions,
         run_name=args.run_name,
     )
 

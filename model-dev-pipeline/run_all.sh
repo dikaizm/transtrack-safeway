@@ -94,6 +94,7 @@ log_step "4/6  Evaluating segmentation model (day / wet / night)"
 python evaluate.py \
     --config config/yolo_segmentation.yaml \
     --model "$SEG_WEIGHTS" \
+    --eval-mode condition \
     --run-name "eval-seg-${RUN_NAME}" \
     2>&1 | tee "logs/eval_seg_${RUN_NAME}.log"
 
@@ -130,6 +131,7 @@ log_step "6/6  Evaluating detection model (day / wet / night)"
 python evaluate.py \
     --config config/yolo_detection.yaml \
     --model "$DET_WEIGHTS" \
+    --eval-mode condition \
     --run-name "eval-det-${RUN_NAME}" \
     2>&1 | tee "logs/eval_det_${RUN_NAME}.log"
 
