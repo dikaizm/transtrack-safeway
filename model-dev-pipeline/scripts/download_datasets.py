@@ -20,14 +20,14 @@ DATASETS = {
     "seg": {
         "workspace": "stelar",
         "project":   "rdd-mining-road-seg",
-        "version":   2,
+        "version":   4,
         "format":    "yolov8",      # SegFormer reads YOLO polygon labels
         "dest":      DATA / "segmentation",
     },
     "det": {
         "workspace": "stelar",
         "project":   "rdd-mining-road-det",
-        "version":   6,
+        "version":   7,
         "format":    "yolov8",      # Ultralytics RT-DETR reads YOLO format labels
         "dest":      DATA / "detection",
     },
